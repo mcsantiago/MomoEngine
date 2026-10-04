@@ -25,6 +25,7 @@ struct AllocatedImage
     uint32_t width;
     uint32_t height;
 };
+
 struct AllocatedBuffer
 {
     vk::raii::DeviceMemory memory;
@@ -41,7 +42,7 @@ struct VulkanTextureData
 struct VulkanMaterialData
 {
     bool doubleSided;
-    Assets::TextureHandle baseColorTextureHandle;
+    vk::DescriptorSet baseColorTextureDescriptorSet; 
 };
 
 struct GPUMesh
@@ -55,7 +56,7 @@ struct VulkanMeshData
     const GPUMesh& gpuMesh;
     glm::mat4 localTransform;
     glm::vec4 baseColorFactor;
-    Assets::MaterialHandle materialHandle;
+    VulkanMaterialData materialData; // Descriptor set for the mesh's material
 };
 
 struct VulkanModelData

@@ -64,7 +64,6 @@ void AssetRegistry::Init() {
 }
 
 TextureHandle AssetRegistry::Resolve(TextureHandle handle) const {
-    /*
     if (textureAssets.Has(handle)) {
         return handle;
     }
@@ -74,7 +73,6 @@ TextureHandle AssetRegistry::Resolve(TextureHandle handle) const {
         LOG_WARN("AssetRegistry", "Texture handle {} not found. Using missing texture.", handle.id);
         return missingTexture;
     }
-    */
     return defaultTexture;
 }
 

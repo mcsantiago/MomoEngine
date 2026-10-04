@@ -5,6 +5,8 @@ add_library(MomoEngine STATIC
   src/Platform/GLFW/GLFWWindow.cpp
   src/Platform/GLFW/WindowVulkan.cpp
   src/Renderer/VulkanRenderer.cpp
+  include/Momo/Renderer/DescriptorAllocator.h
+  src/Renderer/DescriptorAllocator.cpp
   include/Momo/Renderer/Camera.h
   src/Renderer/Camera.cpp
   include/Momo/Input/InputState.h

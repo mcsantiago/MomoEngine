@@ -9,6 +9,7 @@
 #include "Momo/Geometry/Vertex.h"
 #include "VulkanMeshData.h"
 #include "Momo/Assets/ModelData.h"
+#include "Momo/Renderer/DescriptorAllocator.h"
 
 namespace Momo {
 namespace Renderer {
@@ -23,6 +24,7 @@ public:
     AllocatedBuffer CreateVertexBuffer(const std::vector<Momo::Geometry::Vertex>& vertices);
     AllocatedBuffer CreateIndexBuffer(const std::vector<uint32_t>& indices);
     AllocatedImage  CreateAndSubmitTextureImage(const Assets::TextureData& texture);
+    vk::DescriptorSet CreateMaterialDescriptorSet(const AllocatedImage& baseColorTexture);
 private:
     void CreateInstance();
     void PickPhysicalDevice();
@@ -40,6 +42,7 @@ private:
     void CreateRenderFinishedSemaphores();
     void CreateTextureSampler();
     void CreateDescriptorSetLayout();
+    void WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedImage& textureImage);
 
     void BeginFrame(uint32_t imageIndex);
     void EndFrame(uint32_t imageIndex);
@@ -64,6 +67,7 @@ private:
     std::optional<vk::raii::SurfaceKHR> m_Surface;
     std::optional<vk::raii::PhysicalDevice> m_PhysicalDevice;
     std::optional<vk::raii::Device> m_Device;
+    DescriptorAllocator m_DescriptorAllocator;
 
     // Swapchain details
     std::optional<vk::raii::SwapchainKHR> m_Swapchain;
@@ -99,8 +103,6 @@ private:
     // Texture Image resources
     std::optional<vk::raii::Sampler> m_TextureSampler;
     std::optional<vk::raii::DescriptorSetLayout> m_DescriptorSetLayout;
-    std::optional<vk::raii::DescriptorPool> m_DescriptorPool;
-    std::optional<vk::raii::DescriptorSet> m_DescriptorSet;
 
     // Intended for use when setting up Vulkan validation layers in instance creation.
     std::vector<char const*> m_ValidationLayers = {

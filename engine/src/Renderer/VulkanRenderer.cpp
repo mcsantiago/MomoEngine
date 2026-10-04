@@ -10,6 +10,7 @@
 #include <set>
 #include <algorithm>
 #include <array>
+#include <vulkan/vulkan_raii.hpp>
 
 #ifdef NDEBUG
     constexpr bool enableValidationLayers = false;
@@ -193,6 +194,7 @@ namespace Renderer {
         CreateSyncObjects();
         LOG_DEBUG("VulkanRenderer", "Creating texture sampler...");
         CreateTextureSampler();
+        m_DescriptorAllocator.Init(*m_Device, std::nullopt);
     }
 
     void VulkanRenderer::CreateTextureSampler()
@@ -231,18 +233,6 @@ namespace Renderer {
         layoutInfo.pBindings = &samplerLayoutBinding;
 
         m_DescriptorSetLayout = vk::raii::DescriptorSetLayout(*m_Device, layoutInfo);
-
-        vk::DescriptorPoolSize poolSize{};
-        poolSize.type = vk::DescriptorType::eCombinedImageSampler;
-        poolSize.descriptorCount = 1;
-
-        vk::DescriptorPoolCreateInfo poolInfo{};
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = 1;
-        poolInfo.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
-
-        m_DescriptorPool = vk::raii::DescriptorPool(*m_Device, poolInfo);
     }
 
     void VulkanRenderer::Shutdown()
@@ -251,6 +241,7 @@ namespace Renderer {
         // Explicitly reset the optional to destroy the instance now
         // This also implicitly destroys the VkPhysicalDevice so no need to set it here
         m_Device->waitIdle();
+        m_DescriptorAllocator.Destroy();
     }
 
     vk::raii::CommandBuffer VulkanRenderer::BeginSingleUseCommandBuffer()
@@ -423,7 +414,6 @@ namespace Renderer {
                 m_SubOptimal = true;
             }
             BeginFrame(imageIndex);
-            m_CommandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 0, {*m_DescriptorSet}, nullptr);
 
             // Draw
             m_CommandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, **m_GraphicsPipeline);
@@ -436,6 +426,7 @@ namespace Renderer {
             m_CommandBuffer->setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
 
             for (const auto& mesh : modelData.meshes) {
+                m_CommandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 0, {mesh.materialData.baseColorTextureDescriptorSet}, nullptr);
                 m_CommandBuffer->bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
                 m_CommandBuffer->bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
                 PushConstantData pushConstantData;
@@ -451,7 +442,6 @@ namespace Renderer {
                 );
                 m_CommandBuffer->drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0); // Draw a quad using indices
             }
-            
 
             EndFrame(imageIndex);
         } catch (const vk::OutOfDateKHRError& e) {
@@ -486,9 +476,33 @@ namespace Renderer {
     {
         auto stagingBuffer = CreateTextureStagingBuffer(texture);
         auto textureImage = CreateTextureImage(texture);
-        AllocateDescriptorSet(textureImage.imageView);
         SubmitTextureImage(stagingBuffer, textureImage);
         return textureImage;
+    }
+
+    vk::DescriptorSet VulkanRenderer::CreateMaterialDescriptorSet(const AllocatedImage& baseColorTexture)
+    {
+        auto descriptorSet = m_DescriptorAllocator.AllocateDescriptorSet(**m_DescriptorSetLayout);
+        WriteDescriptorSet(descriptorSet, baseColorTexture);
+        return descriptorSet;
+    }
+
+    void VulkanRenderer::WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedImage& textureImage)
+    {
+        vk::DescriptorImageInfo imageInfo = vk::DescriptorImageInfo(
+            *m_TextureSampler,
+            textureImage.imageView,
+            vk::ImageLayout::eShaderReadOnlyOptimal
+        );
+
+        vk::WriteDescriptorSet descriptorWrite = vk::WriteDescriptorSet();
+        descriptorWrite.dstSet = descriptorSet;
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pImageInfo = &imageInfo;
+
+        m_Device->updateDescriptorSets({descriptorWrite}, {});
     }
 
     AllocatedImage VulkanRenderer::CreateTextureImage(const Assets::TextureData& texture)
@@ -531,33 +545,6 @@ namespace Renderer {
         auto imageView = vk::raii::ImageView(*m_Device, viewInfo);
 
         return AllocatedImage{ std::move(imageMemory), std::move(image), std::move(imageView), texture.width, texture.height };
-    }
-
-    void VulkanRenderer::AllocateDescriptorSet(const vk::raii::ImageView& imageView) 
-    {
-        // Allocate descriptor set
-        vk::DescriptorSetAllocateInfo allocInfo{};
-        allocInfo.descriptorPool = **m_DescriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &**m_DescriptorSetLayout;
-
-        auto sets = vk::raii::DescriptorSets(*m_Device, allocInfo);
-        m_DescriptorSet = std::move(sets.front());
-
-        vk::DescriptorImageInfo imageInfo = vk::DescriptorImageInfo(
-            *m_TextureSampler,
-            *imageView,
-            vk::ImageLayout::eShaderReadOnlyOptimal
-        );
-
-        vk::WriteDescriptorSet descriptorWrite = vk::WriteDescriptorSet();
-        descriptorWrite.dstSet = *m_DescriptorSet;
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.descriptorType = vk::DescriptorType::eCombinedImageSampler;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &imageInfo;
-
-        m_Device->updateDescriptorSets({descriptorWrite}, {});
     }
 
     void VulkanRenderer::SubmitTextureImage(const AllocatedBuffer& stagingBuffer, const AllocatedImage& textureImage) 

@@ -1,4 +1,5 @@
 #include "Momo/Core/Application.h"
+#include "Momo/Cache/DataCache.h"
 #include "Momo/Renderer/VulkanMeshData.h"
 #include <chrono>
 #include <Momo/Logging/Logger.h>
@@ -10,9 +11,9 @@ namespace Momo
 {
     Application::Application(const ApplicationSpecification& spec)
         : m_Spec(spec),
-          m_MeshCache(m_AssetRegistry, m_Renderer),
-          m_MaterialCache(m_AssetRegistry, m_Renderer),
-          m_TextureCache(m_AssetRegistry, m_Renderer)
+          m_MeshCache(m_AssetRegistry, {m_Renderer, nullptr}), // Mesh cache has no further dependencies
+          m_TextureCache(m_AssetRegistry, {m_Renderer, nullptr}), // Texture cache has no further dependencies
+          m_MaterialCache(m_AssetRegistry,  {m_Renderer, &m_TextureCache})
     {
         LOG_INFO("Momo", "Starting '{}' ({}x{})", m_Spec.Name, m_Spec.WindowSpec.Width, m_Spec.WindowSpec.Height);
         m_Window = std::unique_ptr<IWindow>(IWindow::Create(m_Spec.WindowSpec));
@@ -36,7 +37,9 @@ namespace Momo
     void Application::LoadScene(const std::filesystem::path &path)
     {
         // const std::filesystem::path modelPath = "Assets/Models/Duck/Duck.gltf";
-        const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
+        // const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
+        const std::filesystem::path modelPath = "Assets/Models/FlightHelmet/FlightHelmet.gltf";
+
         if (!std::filesystem::exists(modelPath)) {
             LOG_ERROR("Momo", "Model file does not exist: {}", modelPath.generic_string());
             return;
@@ -88,12 +91,12 @@ namespace Momo
             return;
         }
 
+        // TODO: This doesn't have to be done every frame, but for now it's a simple way to ensure the data is up-to-date
         Renderer::VulkanModelData vulkanModelData{};
         const Assets::ModelHandle& modelHandle = m_ActiveScene->GetModels().front(); // TODO: Handle multiple models and empty scene cases
         for (const auto& meshHandle : m_AssetRegistry.Get(modelHandle).meshes)
         {
             const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
-            const Assets::Material& material = m_AssetRegistry.Get(mesh.materialHandle);
 
             vulkanModelData.meshes.push_back(Renderer::VulkanMeshData {
                 .gpuMesh = m_MeshCache.GetOrCreate(meshHandle),
@@ -101,10 +104,8 @@ namespace Momo
                 .baseColorFactor = mesh.materialHandle.IsValid()
                     ? m_AssetRegistry.Get(mesh.materialHandle).baseColorFactor
                     : glm::vec4(0.5f, 0.1f, 0.7f, 1.0f),
-                .materialHandle = mesh.materialHandle,
+                .materialData = m_MaterialCache.GetOrCreate(mesh.materialHandle),
             });
-
-            m_TextureCache.GetOrCreate(material.baseColorTextureHandle);
         }
         glm::vec3 rotationAxis = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));
         glm::mat4 modelMatrix = glm::rotate(glm::mat4(1.0f), m_TotalTime * m_CubeRotationSpeed, rotationAxis);
