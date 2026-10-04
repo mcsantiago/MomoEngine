@@ -16,6 +16,7 @@ TextureData ToTextureData(TextureSource&& source) {
 
 Material ToMaterial(const MaterialSource& source, const TextureHandle textureHandle) {
     Material material;
+    material.doubleSided = source.doubleSided;
     material.baseColorFactor = source.baseColorFactor;
     material.alphaMode = source.alphaMode;
     material.alphaCutoff = source.alphaCutoff;

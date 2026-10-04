@@ -37,8 +37,8 @@ namespace Momo
     void Application::LoadScene(const std::filesystem::path &path)
     {
         // const std::filesystem::path modelPath = "Assets/Models/Duck/Duck.gltf";
-        // const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
-        const std::filesystem::path modelPath = "Assets/Models/FlightHelmet/FlightHelmet.gltf";
+        const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
+        // const std::filesystem::path modelPath = "Assets/Models/FlightHelmet/FlightHelmet.gltf";
 
         if (!std::filesystem::exists(modelPath)) {
             LOG_ERROR("Momo", "Model file does not exist: {}", modelPath.generic_string());
@@ -71,6 +71,12 @@ namespace Momo
 
             m_Window->PollEvents();
             m_InputState = m_Window->ReadInput();
+            if (m_InputState.keys.IsKeyPressed(Input::Key::Escape))
+            {
+                LOG_INFO("Momo", "Quit requested. Exiting main loop.");
+                m_Running = false;
+                break;
+            }
 
             for (auto& layer : m_Layers)
                 layer->OnUpdate(dt);

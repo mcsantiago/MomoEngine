@@ -16,7 +16,8 @@ enum class Action {
     MoveUp,
     MoveDown,
     Jump,
-    UIAccept
+    UIAccept,
+    UIQuit
 };
 
 

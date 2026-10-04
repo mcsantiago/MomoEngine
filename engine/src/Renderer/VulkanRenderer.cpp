@@ -426,6 +426,7 @@ namespace Renderer {
             m_CommandBuffer->setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
 
             for (const auto& mesh : modelData.meshes) {
+                m_CommandBuffer->setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
                 m_CommandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 0, {mesh.materialData.baseColorTextureDescriptorSet}, nullptr);
                 m_CommandBuffer->bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
                 m_CommandBuffer->bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
@@ -744,7 +745,7 @@ namespace Renderer {
             VK_FALSE,                         // depthClampEnable
             VK_FALSE,                         // rasterizerDiscardEnable
             vk::PolygonMode::eFill,          // polygonMode - fill triangles
-            vk::CullModeFlagBits::eBack,     // cullMode - cull back faces
+            {},                                      // cullMode - set dynamically per mesh
             vk::FrontFace::eCounterClockwise,       // frontFace
             VK_FALSE,                         // depthBiasEnable
             0.0f,                             // depthBiasConstantFactor
@@ -801,9 +802,10 @@ namespace Renderer {
         // ═══════════════════════════════════════════════════════════
         // 8. DYNAMIC STATE - Properties that can change without pipeline recreation
         // ═══════════════════════════════════════════════════════════
-        std::array<vk::DynamicState, 2> dynamicStates = {
+        std::array<vk::DynamicState, 3> dynamicStates = {
             vk::DynamicState::eViewport,
-            vk::DynamicState::eScissor
+            vk::DynamicState::eScissor,
+            vk::DynamicState::eCullMode, 
         };
         vk::PipelineDynamicStateCreateInfo dynamicState({}, dynamicStates);
         LOG_DEBUG("VulkanRenderer", "Dynamic state configured (viewport and scissor)");
