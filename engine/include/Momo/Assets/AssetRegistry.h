@@ -12,14 +12,14 @@ namespace Momo::Assets {
 class AssetRegistry
 {
 public:
-    const TextureData& Get(TextureHandle handle) const { return textureAssets.Get(handle); }
+    const TextureData& Get(TextureHandle handle) const { return m_TextureAssets.Get(handle); }
 
     // TODO: Handle default Material for missing materials
-    const Material& Get(MaterialHandle handle) const { return materialAssets.Get(handle); }
+    const Material& Get(MaterialHandle handle) const { return m_MaterialAssets.Get(handle); }
 
     // Missing meshes is genuinely an error and should be handled appropriately.
-    const Mesh& Get(MeshHandle handle) const { return meshAssets.Get(handle); }
-    const Model& Get(ModelHandle handle) const { return modelAssets.Get(handle); }
+    const Mesh& Get(MeshHandle handle) const { return m_MeshAssets.Get(handle); }
+    const Model& Get(ModelHandle handle) const { return m_ModelAssets.Get(handle); }
 
     // Registers everything a loader produced and hands back the model. This is
     // the only place local ModelSource indices become engine-wide handles:
@@ -38,18 +38,18 @@ public:
     TextureHandle Resolve(TextureHandle handle) const;
 
 private:
-    AssetPool<TextureData, TextureTag> textureAssets;
-    AssetPool<Material, MaterialTag> materialAssets;
-    AssetPool<Mesh, MeshTag> meshAssets;
-    AssetPool<Model, ModelTag> modelAssets;
+    AssetPool<TextureData, TextureTag> m_TextureAssets;
+    AssetPool<Material, MaterialTag> m_MaterialAssets;
+    AssetPool<Mesh, MeshTag> m_MeshAssets;
+    AssetPool<Model, ModelTag> m_ModelAssets;
 
     // 1x1 opaque white: multiplies out to baseColorFactor in the shader.
-    TextureHandle defaultTexture;
+    TextureHandle m_DefaultTexture;
     // Magenta/black checkerboard for textures that should exist but don't, so
     // broken assets are obvious on screen rather than only in the log.
-    TextureHandle missingTexture;
+    TextureHandle m_MissingTexture;
 
-    std::unordered_map<std::string, TextureHandle> texturesByPath;
+    std::unordered_map<std::string, TextureHandle> m_TexturesByPath;
 };
 
 } // namespace Momo::Assets

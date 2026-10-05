@@ -50,7 +50,7 @@ struct VulkanTextureData
 struct VulkanMaterialData
 {
     bool doubleSided;
-    vk::DescriptorSet baseColorTextureDescriptorSet; 
+    vk::DescriptorSet descriptorSet; 
     AllocatedBuffer paramsBuffer; // UBO for the material's parameters (baseColorFactor, alphaCutoff)
 };
 

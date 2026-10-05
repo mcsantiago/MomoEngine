@@ -3,8 +3,6 @@
 #include "Momo/Renderer/VulkanMeshData.h"
 #include <chrono>
 #include <Momo/Logging/Logger.h>
-#include <glm/detail/qualifier.hpp>
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE // Vulkan depth [0, 1] range
 #include <glm/glm.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/string_cast.hpp>
@@ -110,7 +108,7 @@ namespace Momo
             vulkanModelData.meshes.push_back(Renderer::VulkanMeshData {
                 .gpuMesh = m_MeshCache.GetOrCreate(meshHandle),
                 .localTransform = mesh.localTransform,
-                .materialData = std::move(materialData)
+                .materialData = materialData
             });
         }
         //glm::vec3 rotationAxis = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));

@@ -8,7 +8,6 @@ struct VertexInput {
 struct MaterialParams {
     float4 baseColorFactor;
     float  alphaCutoff;
-    float3 _pad;
 };
 [vk::binding(1, 0)] ConstantBuffer<MaterialParams> material;
 

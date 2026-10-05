@@ -39,7 +39,7 @@ void AssetRegistry::Init() {
     white.width = 1;
     white.height = 1;
     white.channels = 4;
-    defaultTexture = textureAssets.Add(std::move(white));
+    m_DefaultTexture = m_TextureAssets.Add(std::move(white));
 
     // 64x64 with 8x8 cells rather than 2x2: the shared sampler filters
     // linearly, so a tiny texture stretched over a mesh would blur into a
@@ -61,20 +61,20 @@ void AssetRegistry::Init() {
             pixel[3] = 255;
         }
     }
-    missingTexture = textureAssets.Add(std::move(checker));
+    m_MissingTexture = m_TextureAssets.Add(std::move(checker));
 }
 
 TextureHandle AssetRegistry::Resolve(TextureHandle handle) const {
-    if (textureAssets.Has(handle)) {
+    if (m_TextureAssets.Has(handle)) {
         return handle;
     }
     // An Invalid handle just means "no texture", which glTF allows. A valid id
     // that isn't in the pool means something removed it out from under us.
     if (handle.IsValid()) {
-        LOG_WARN("AssetRegistry", "Texture handle {} not found. Using missing texture.", handle.id);
-        return missingTexture;
+        LOG_WARN("AssetRegistry", "Texture handle {} not found. Using m_Missing texture.", handle.id);
+        return m_MissingTexture;
     }
-    return defaultTexture;
+    return m_DefaultTexture;
 }
 
 ModelHandle AssetRegistry::RegisterModel(ModelSource&& source) {
@@ -84,7 +84,7 @@ ModelHandle AssetRegistry::RegisterModel(ModelSource&& source) {
     std::vector<TextureHandle> textureHandles(source.textures.size());
     for (size_t i = 0; i < source.textures.size(); ++i) {
         if (!source.textures[i].IsEmpty()) {
-            textureHandles[i] = textureAssets.Add(ToTextureData(std::move(source.textures[i])));
+            textureHandles[i] = m_TextureAssets.Add(ToTextureData(std::move(source.textures[i])));
         }
     }
 
@@ -95,11 +95,11 @@ ModelHandle AssetRegistry::RegisterModel(ModelSource&& source) {
         if (src.baseColorTexture) {
             textureHandle = textureHandles[*src.baseColorTexture];
             if (!textureHandle.IsValid()) {
-                LOG_WARN("AssetRegistry", "Material {} references texture {} which failed to decode. Using missing texture.", i, *src.baseColorTexture);
-                textureHandle = missingTexture;
+                LOG_WARN("AssetRegistry", "Material {} references texture {} which failed to decode. Using m_Missing texture.", i, *src.baseColorTexture);
+                textureHandle = m_MissingTexture;
             }
         }
-        materialHandles[i] = materialAssets.Add(ToMaterial(src, Resolve(textureHandle)));
+        materialHandles[i] = m_MaterialAssets.Add(ToMaterial(src, Resolve(textureHandle)));
     }
 
     Model model;
@@ -108,9 +108,9 @@ ModelHandle AssetRegistry::RegisterModel(ModelSource&& source) {
         // TODO: Consider using a default material or logging a warning when a mesh has no material.
         const auto materialHandle = meshSource.materialIndex ? materialHandles[*meshSource.materialIndex] : MaterialHandle{};
         Mesh mesh = ToMesh(std::move(meshSource), materialHandle);
-        model.meshes.push_back(meshAssets.Add(std::move(mesh)));
+        model.meshes.push_back(m_MeshAssets.Add(std::move(mesh)));
     }
 
-    return modelAssets.Add(std::move(model));
+    return m_ModelAssets.Add(std::move(model));
 }
 } // namespace Momo::Assets

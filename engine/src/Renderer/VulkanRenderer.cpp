@@ -2,7 +2,6 @@
 #include "Momo/Renderer/VulkanMeshData.h"
 #include "Momo/WindowVulkan.h"
 #include "Momo/Logging/Logger.h"
-#include <glm/detail/qualifier.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
 #include <stdexcept>
@@ -13,7 +12,6 @@
 #include <algorithm>
 #include <array>
 #include <vulkan/vulkan_raii.hpp>
-#include <vulkan/vulkan_structs.hpp>
 
 #ifdef NDEBUG
     constexpr bool enableValidationLayers = false;
@@ -244,8 +242,8 @@ namespace Renderer {
         };
 
         vk::DescriptorSetLayoutCreateInfo layoutInfo{};
-        layoutInfo.bindingCount = bindings.size();
-        layoutInfo.pBindings = static_cast<const vk::DescriptorSetLayoutBinding*>(bindings.data());
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
 
         m_DescriptorSetLayout = vk::raii::DescriptorSetLayout(*m_Device, layoutInfo);
     }
@@ -442,7 +440,13 @@ namespace Renderer {
 
             for (const auto& mesh : modelData.meshes) {
                 m_CommandBuffer->setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
-                m_CommandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 0, {mesh.materialData.baseColorTextureDescriptorSet}, nullptr);
+                m_CommandBuffer->bindDescriptorSets(
+                        vk::PipelineBindPoint::eGraphics, 
+                        **m_PipelineLayout, 
+                        0, 
+                        {mesh.materialData.descriptorSet}, 
+                        nullptr
+                );
                 m_CommandBuffer->bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
                 m_CommandBuffer->bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
                 PushConstantData pushConstantData;
@@ -502,7 +506,7 @@ namespace Renderer {
         WriteDescriptorSet(descriptorSet, ubo, baseColorTexture);
         return VulkanMaterialData{ 
             .doubleSided=doubleSided,
-            .baseColorTextureDescriptorSet=descriptorSet, 
+            .descriptorSet=descriptorSet, 
             .paramsBuffer=std::move(ubo)
         };
     }
