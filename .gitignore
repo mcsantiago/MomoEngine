@@ -21,3 +21,8 @@ compile_commands.json
 
 # Project-specific files
 TODO.md
+
+# Khronos glTF sample models, local test assets only (~100 MB, see each LICENSE.md)
+application/Assets/Models/FlightHelmet/
+application/Assets/Models/Sponza/
+application/Assets/Models/DamagedHelmet/

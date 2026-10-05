@@ -21,10 +21,10 @@ public:
     void Shutdown();
     void RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix);
 
-    AllocatedBuffer CreateVertexBuffer(const std::vector<Momo::Geometry::Vertex>& vertices);
-    AllocatedBuffer CreateIndexBuffer(const std::vector<uint32_t>& indices);
-    AllocatedImage  CreateAndSubmitTextureImage(const Assets::TextureData& texture);
-    vk::DescriptorSet CreateMaterialDescriptorSet(const AllocatedImage& baseColorTexture);
+    AllocatedBuffer     CreateVertexBuffer(const std::vector<Momo::Geometry::Vertex>& vertices);
+    AllocatedBuffer     CreateIndexBuffer(const std::vector<uint32_t>& indices);
+    AllocatedImage      CreateAndSubmitTextureImage(const Assets::TextureData& texture);
+    VulkanMaterialData  CreateVulkanMaterialData(const AllocatedImage& baseColorTexture, const MaterialParams& materialParams, bool doubleSided);
 private:
     void CreateInstance();
     void PickPhysicalDevice();
@@ -42,7 +42,7 @@ private:
     void CreateRenderFinishedSemaphores();
     void CreateTextureSampler();
     void CreateDescriptorSetLayout();
-    void WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedImage& textureImage);
+    void WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedBuffer& ubo, const AllocatedImage& textureImage);
 
     void BeginFrame(uint32_t imageIndex);
     void EndFrame(uint32_t imageIndex);

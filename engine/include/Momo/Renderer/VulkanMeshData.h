@@ -9,13 +9,21 @@
 
 namespace Momo {
 namespace Renderer {
+struct alignas(16) MaterialParams
+{
+    glm::vec4 baseColorFactor;
+    float alphaCutoff;
+    float _pad[3]; // Padding to make the struct size a multiple of 16 bytes
+};
+static_assert(sizeof(MaterialParams) == 32, "MaterialParams size must be 32 bytes");
+
 struct PushConstantData
 {
     glm::mat4 projectionMatrix;
     glm::mat4 viewMatrix;
     glm::mat4 modelMatrix;
-    glm::vec4 baseColorFactor;
 };
+static_assert(sizeof(PushConstantData) == 192, "PushConstantData size must be 192 bytes");
 
 struct AllocatedImage
 {
@@ -43,6 +51,7 @@ struct VulkanMaterialData
 {
     bool doubleSided;
     vk::DescriptorSet baseColorTextureDescriptorSet; 
+    AllocatedBuffer paramsBuffer; // UBO for the material's parameters (baseColorFactor, alphaCutoff)
 };
 
 struct GPUMesh
@@ -55,8 +64,7 @@ struct VulkanMeshData
 {
     const GPUMesh& gpuMesh;
     glm::mat4 localTransform;
-    glm::vec4 baseColorFactor;
-    VulkanMaterialData materialData; // Descriptor set for the mesh's material
+    const VulkanMaterialData& materialData; // Descriptor set for the mesh's material
 };
 
 struct VulkanModelData

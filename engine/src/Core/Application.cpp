@@ -3,6 +3,7 @@
 #include "Momo/Renderer/VulkanMeshData.h"
 #include <chrono>
 #include <Momo/Logging/Logger.h>
+#include <glm/detail/qualifier.hpp>
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE // Vulkan depth [0, 1] range
 #include <glm/glm.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
@@ -37,8 +38,9 @@ namespace Momo
     void Application::LoadScene(const std::filesystem::path &path)
     {
         // const std::filesystem::path modelPath = "Assets/Models/Duck/Duck.gltf";
-        const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
+        // const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
         // const std::filesystem::path modelPath = "Assets/Models/FlightHelmet/FlightHelmet.gltf";
+        const std::filesystem::path modelPath = "Assets/Models/Sponza/Sponza.gltf";
 
         if (!std::filesystem::exists(modelPath)) {
             LOG_ERROR("Momo", "Model file does not exist: {}", modelPath.generic_string());
@@ -52,7 +54,7 @@ namespace Momo
         }
         Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
         m_ActiveScene->AddModel(handle);
-        m_Camera = Camera(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
+        m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
     }
 
     void Application::Run()
@@ -103,18 +105,17 @@ namespace Momo
         for (const auto& meshHandle : m_AssetRegistry.Get(modelHandle).meshes)
         {
             const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
+            const Renderer::VulkanMaterialData& materialData = m_MaterialCache.GetOrCreate(mesh.materialHandle);
 
             vulkanModelData.meshes.push_back(Renderer::VulkanMeshData {
                 .gpuMesh = m_MeshCache.GetOrCreate(meshHandle),
                 .localTransform = mesh.localTransform,
-                .baseColorFactor = mesh.materialHandle.IsValid()
-                    ? m_AssetRegistry.Get(mesh.materialHandle).baseColorFactor
-                    : glm::vec4(0.5f, 0.1f, 0.7f, 1.0f),
-                .materialData = m_MaterialCache.GetOrCreate(mesh.materialHandle),
+                .materialData = std::move(materialData)
             });
         }
-        glm::vec3 rotationAxis = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::mat4 modelMatrix = glm::rotate(glm::mat4(1.0f), m_TotalTime * m_CubeRotationSpeed, rotationAxis);
+        //glm::vec3 rotationAxis = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));
+        //glm::mat4 modelMatrix = glm::rotate(glm::mat4(1.0f), m_TotalTime * m_CubeRotationSpeed, rotationAxis);
+        glm::mat4 modelMatrix = glm::mat4(1.0f); // Identity for now, should be replaced with actual entity transform
         LOG_TRACE("Momo", "Model matrix: {}", glm::to_string(modelMatrix));
 
         m_Renderer.RenderFrame(vulkanModelData, m_Camera->GetViewMatrix(), modelMatrix);

@@ -43,18 +43,23 @@ void DescriptorAllocator::Destroy() {
 }
 
 void DescriptorAllocator::CreateDescriptorPool() {
-    // TODO: What if there are other types of descriptors? 
-    // For now, we only support combined image samplers, but this should be extended in the future.
     vk::DescriptorPoolSize poolSize(
         vk::DescriptorType::eCombinedImageSampler,
         m_PoolSize
     );
 
+    vk::DescriptorPoolSize poolSizeUBO(
+        vk::DescriptorType::eUniformBuffer,
+        m_PoolSize
+    );
+
+    std::array<vk::DescriptorPoolSize, 2> poolSizes = { poolSize, poolSizeUBO };
+
     vk::DescriptorPoolCreateInfo poolInfo(
         {},
         m_PoolSize,
-        1,
-        &poolSize
+        static_cast<uint32_t>(poolSizes.size()),
+        poolSizes.data()
     );
 
     m_DescriptorPool = m_Device.createDescriptorPool(poolInfo);

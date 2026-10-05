@@ -1,6 +1,8 @@
 #include "Momo/Renderer/VulkanRenderer.h"
+#include "Momo/Renderer/VulkanMeshData.h"
 #include "Momo/WindowVulkan.h"
 #include "Momo/Logging/Logger.h"
+#include <glm/detail/qualifier.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
 #include <stdexcept>
@@ -11,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <vulkan/vulkan_raii.hpp>
+#include <vulkan/vulkan_structs.hpp>
 
 #ifdef NDEBUG
     constexpr bool enableValidationLayers = false;
@@ -228,9 +231,21 @@ namespace Renderer {
         samplerLayoutBinding.pImmutableSamplers = nullptr;
         samplerLayoutBinding.stageFlags = vk::ShaderStageFlagBits::eFragment;
 
+        vk::DescriptorSetLayoutBinding materialLayoutBinding{};
+        materialLayoutBinding.binding = 1;
+        materialLayoutBinding.descriptorCount = 1;
+        materialLayoutBinding.descriptorType = vk::DescriptorType::eUniformBuffer;
+        materialLayoutBinding.pImmutableSamplers = nullptr;
+        materialLayoutBinding.stageFlags = vk::ShaderStageFlagBits::eFragment;
+
+        std::array<vk::DescriptorSetLayoutBinding, 2> bindings{
+            samplerLayoutBinding,
+            materialLayoutBinding
+        };
+
         vk::DescriptorSetLayoutCreateInfo layoutInfo{};
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &samplerLayoutBinding;
+        layoutInfo.bindingCount = bindings.size();
+        layoutInfo.pBindings = static_cast<const vk::DescriptorSetLayoutBinding*>(bindings.data());
 
         m_DescriptorSetLayout = vk::raii::DescriptorSetLayout(*m_Device, layoutInfo);
     }
@@ -434,7 +449,6 @@ namespace Renderer {
                 pushConstantData.projectionMatrix = m_ProjectionMatrix;
                 pushConstantData.viewMatrix = viewMatrix;
                 pushConstantData.modelMatrix = modelMatrix * mesh.localTransform; // Move to GPU..?
-                pushConstantData.baseColorFactor = mesh.baseColorFactor;
                 m_CommandBuffer->pushConstants<PushConstantData>(
                     **m_PipelineLayout, 
                     vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 
@@ -481,14 +495,19 @@ namespace Renderer {
         return textureImage;
     }
 
-    vk::DescriptorSet VulkanRenderer::CreateMaterialDescriptorSet(const AllocatedImage& baseColorTexture)
+    VulkanMaterialData VulkanRenderer::CreateVulkanMaterialData(const AllocatedImage& baseColorTexture, const MaterialParams& materialParams, bool doubleSided)
     {
+        auto ubo = CreateBuffer(&materialParams, sizeof(MaterialParams), vk::BufferUsageFlagBits::eUniformBuffer, 0);
         auto descriptorSet = m_DescriptorAllocator.AllocateDescriptorSet(**m_DescriptorSetLayout);
-        WriteDescriptorSet(descriptorSet, baseColorTexture);
-        return descriptorSet;
+        WriteDescriptorSet(descriptorSet, ubo, baseColorTexture);
+        return VulkanMaterialData{ 
+            .doubleSided=doubleSided,
+            .baseColorTextureDescriptorSet=descriptorSet, 
+            .paramsBuffer=std::move(ubo)
+        };
     }
 
-    void VulkanRenderer::WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedImage& textureImage)
+    void VulkanRenderer::WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedBuffer& ubo,  const AllocatedImage& textureImage)
     {
         vk::DescriptorImageInfo imageInfo = vk::DescriptorImageInfo(
             *m_TextureSampler,
@@ -503,7 +522,18 @@ namespace Renderer {
         descriptorWrite.descriptorCount = 1;
         descriptorWrite.pImageInfo = &imageInfo;
 
-        m_Device->updateDescriptorSets({descriptorWrite}, {});
+        vk::DescriptorBufferInfo bufferInfo = vk::DescriptorBufferInfo {
+            *ubo.buffer, 0, sizeof(MaterialParams)
+        };
+
+        vk::WriteDescriptorSet uboDescriptorWrite = vk::WriteDescriptorSet();
+        uboDescriptorWrite.dstSet = descriptorSet;
+        uboDescriptorWrite.dstBinding = 1;
+        uboDescriptorWrite.descriptorType = vk::DescriptorType::eUniformBuffer;
+        uboDescriptorWrite.descriptorCount = 1;
+        uboDescriptorWrite.pBufferInfo = &bufferInfo;
+
+        m_Device->updateDescriptorSets({descriptorWrite, uboDescriptorWrite}, {});
     }
 
     AllocatedImage VulkanRenderer::CreateTextureImage(const Assets::TextureData& texture)

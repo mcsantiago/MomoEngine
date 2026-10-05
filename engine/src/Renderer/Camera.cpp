@@ -20,10 +20,10 @@ void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
     m_LastMouseX = inputState.mouseX;
     m_LastMouseY = inputState.mouseY;
 
-    m_Position += inputState.keys.IsKeyPressed(Input::Key::W) ? m_Front * static_cast<float>(deltaTime) : glm::vec3(0.0f);
-    m_Position += inputState.keys.IsKeyPressed(Input::Key::S) ? -m_Front * static_cast<float>(deltaTime) : glm::vec3(0.0f);
-    m_Position += inputState.keys.IsKeyPressed(Input::Key::A) ? -m_Right * static_cast<float>(deltaTime) : glm::vec3(0.0f);
-    m_Position += inputState.keys.IsKeyPressed(Input::Key::D) ? m_Right * static_cast<float>(deltaTime) : glm::vec3(0.0f);
+    m_Position += inputState.keys.IsKeyPressed(Input::Key::W) ? m_Front * static_cast<float>(deltaTime) * m_MovementSpeed : glm::vec3(0.0f);
+    m_Position += inputState.keys.IsKeyPressed(Input::Key::S) ? -m_Front * static_cast<float>(deltaTime) * m_MovementSpeed : glm::vec3(0.0f);
+    m_Position += inputState.keys.IsKeyPressed(Input::Key::A) ? -m_Right * static_cast<float>(deltaTime) * m_MovementSpeed : glm::vec3(0.0f);
+    m_Position += inputState.keys.IsKeyPressed(Input::Key::D) ? m_Right * static_cast<float>(deltaTime) * m_MovementSpeed : glm::vec3(0.0f);
     // m_Position += inputState.keys.IsKeyPressed(Input::Key::Q) ? -m_Up * static_cast<float>(deltaTime) : glm::vec3(0.0f);
     // m_Position += inputState.keys.IsKeyPressed(Input::Key::E) ? m_Up * static_cast<float>(deltaTime) : glm::vec3(0.0f);
 

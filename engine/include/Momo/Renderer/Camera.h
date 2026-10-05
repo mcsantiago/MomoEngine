@@ -22,6 +22,7 @@ private:
 
     float m_Yaw;
     float m_Pitch;
+    float m_MovementSpeed = 2.5f;
 
     bool m_FirstMouse = true;
     double m_LastMouseX = 0;

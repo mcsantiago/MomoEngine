@@ -2,6 +2,7 @@
 
 #include "Momo/Assets/Handle.h"
 #include "Momo/Assets/AssetRegistry.h"
+#include "Momo/Renderer/VulkanMeshData.h"
 #include "Momo/Renderer/VulkanRenderer.h"
 #include <unordered_map>
 
@@ -64,12 +65,15 @@ template <> struct GPUResourceTraits<Assets::MeshTag> {
 template <> struct GPUResourceTraits<Assets::MaterialTag> {
     using GPUType = VulkanMaterialData;
     static GPUType Create(const Assets::Material& material, GPUContext ctx) {
-        return VulkanMaterialData {
-            .doubleSided = material.doubleSided,
-            .baseColorTextureDescriptorSet = ctx.renderer.CreateMaterialDescriptorSet(
-                ctx.textures->GetOrCreate(material.baseColorTextureHandle)
-            )
+        // Blend can stay "never discard" until it gets its own pipeline.
+        MaterialParams params = MaterialParams {
+            .baseColorFactor = material.baseColorFactor,
+            .alphaCutoff = (material.alphaMode == Assets::AlphaMode::Mask) ? material.alphaCutoff : -1.0f,
+            ._pad = {0,0,0}
         };
+        return ctx.renderer.CreateVulkanMaterialData(
+                ctx.textures->GetOrCreate(material.baseColorTextureHandle),
+                params, material.doubleSided);
     }
 };
 
