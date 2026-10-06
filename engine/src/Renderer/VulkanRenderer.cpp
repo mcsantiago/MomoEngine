@@ -212,6 +212,7 @@ namespace Renderer {
             m_GpuTimingEnabled = false;
             return;
         }
+        m_TimestampValidBitmask = validBits == 64 ? 0xFFFFFFFFFFFFFFFFULL : (1ULL << validBits) - 1;
         m_GpuTimingEnabled = true;
         LOG_INFO("VulkanRenderer", "GPU timing enabled. Timestamp period: {} ns, valid bits: {}", m_TimestampPeriodNs, validBits);
     }
@@ -327,8 +328,8 @@ namespace Renderer {
         m_CommandBuffer->reset();
         m_CommandBuffer->begin({});
 
-        m_CommandBuffer->resetQueryPool(**m_TimestampQueryPool, 0, 2);
         if (m_GpuTimingEnabled) {
+            m_CommandBuffer->resetQueryPool(**m_TimestampQueryPool, 0, 2);
             m_CommandBuffer->writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, **m_TimestampQueryPool, 0);
         }
 
@@ -479,7 +480,7 @@ namespace Renderer {
                 vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
 
                 if (result == vk::Result::eSuccess) {
-                    uint64_t elapsedTicks = ticks[1] - ticks[0];
+                    uint64_t elapsedTicks = (ticks[1] - ticks[0]) & m_TimestampValidBitmask;
                     m_LastGpuFrameMs = elapsedTicks * m_TimestampPeriodNs / 1'000'000.0f;
                     LOG_INFO("VulkanRenderer", "GPU frame time: {} ms", m_LastGpuFrameMs);
                 }

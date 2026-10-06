@@ -94,6 +94,7 @@ private:
     std::optional<vk::raii::Fence> m_InFlightFence;
 
     bool m_HasTimestampQueryPoolResults = false;
+    uint64_t m_TimestampValidBitmask = 0;
     double m_LastGpuFrameMs = 0;
     float m_TimestampPeriodNs = 0.0f;   // nanoseconds per timestamp tick
     bool  m_GpuTimingEnabled = false;   // false = skip every timestamp call later
