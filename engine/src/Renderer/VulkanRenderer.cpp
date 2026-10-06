@@ -179,6 +179,10 @@ namespace Renderer {
         PickPhysicalDevice();
         LOG_DEBUG("VulkanRenderer", "Creating logical device...");
         CreateLogicalDevice();
+        LOG_DEBUG("VulkanRenderer", "Checking timestamp support...");
+        CheckTimestampSupport();        // TODO: Maybe this should be checked only if GPU timing is enabled in the config
+        LOG_DEBUG("VulkanRenderer", "Createing timestamp query pool...");
+        CreateTimestampQueryPool();
         LOG_DEBUG("VulkanRenderer", "Creating swap chain...");
         CreateSwapChain();
         LOG_DEBUG("VulkanRenderer", "Creating image views...");
@@ -196,6 +200,33 @@ namespace Renderer {
         LOG_DEBUG("VulkanRenderer", "Creating texture sampler...");
         CreateTextureSampler();
         m_DescriptorAllocator.Init(*m_Device, std::nullopt);
+    }
+
+    void VulkanRenderer::CheckTimestampSupport()
+    {
+        m_TimestampPeriodNs = m_PhysicalDevice->getProperties().limits.timestampPeriod;
+        auto families = m_PhysicalDevice->getQueueFamilyProperties();
+        uint32_t validBits = families[m_GraphicsQueueFamilyIdx].timestampValidBits;
+        if (validBits == 0) {
+            LOG_WARN("VulkanRenderer", "GPU does not support timestamps (validBits == 0). GPU timing disabled.");
+            m_GpuTimingEnabled = false;
+            return;
+        }
+        m_GpuTimingEnabled = true;
+        LOG_INFO("VulkanRenderer", "GPU timing enabled. Timestamp period: {} ns, valid bits: {}", m_TimestampPeriodNs, validBits);
+    }
+
+    void VulkanRenderer::CreateTimestampQueryPool()
+    {
+        if (!m_GpuTimingEnabled) {
+            LOG_DEBUG("VulkanRenderer", "Skipping timestamp query pool creation because GPU timing is disabled.");
+            return;
+        }
+        vk::QueryPoolCreateInfo queryPoolInfo{};
+        queryPoolInfo.queryType = vk::QueryType::eTimestamp;
+        queryPoolInfo.queryCount = 2; // Start and end timestamps
+        m_TimestampQueryPool = vk::raii::QueryPool(*m_Device, queryPoolInfo);
+        LOG_DEBUG("VulkanRenderer", "Created timestamp query pool with {} queries.", queryPoolInfo.queryCount);
     }
 
     void VulkanRenderer::CreateTextureSampler()
@@ -296,6 +327,11 @@ namespace Renderer {
         m_CommandBuffer->reset();
         m_CommandBuffer->begin({});
 
+        m_CommandBuffer->resetQueryPool(**m_TimestampQueryPool, 0, 2);
+        if (m_GpuTimingEnabled) {
+            m_CommandBuffer->writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, **m_TimestampQueryPool, 0);
+        }
+
         vk::ImageMemoryBarrier2 toColorAttachment{};
         toColorAttachment.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
         toColorAttachment.srcAccessMask = {};
@@ -388,6 +424,9 @@ namespace Renderer {
         presentDependency.pImageMemoryBarriers = &toPresent;
 
         m_CommandBuffer->pipelineBarrier2(presentDependency);
+        if (m_GpuTimingEnabled) {
+            m_CommandBuffer->writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, **m_TimestampQueryPool, 1);
+        }
         m_CommandBuffer->end();
 
         // Submit and present
@@ -397,6 +436,9 @@ namespace Renderer {
 
         vk::SubmitInfo submitInfo(waitSemaphores, waitStages, **m_CommandBuffer, signalSemaphores);
         m_GraphicsQueue->submit(submitInfo, **m_InFlightFence);
+        if (m_GpuTimingEnabled) {
+            m_HasTimestampQueryPoolResults = true;
+        }
 
         vk::PresentInfoKHR presentInfo(signalSemaphores, **m_Swapchain, imageIndex);
         auto presentResult = m_PresentQueue->presentKHR(presentInfo);
@@ -418,6 +460,7 @@ namespace Renderer {
         // Wait for fences
         while (vk::Result::eTimeout == 
             m_Device->waitForFences(**m_InFlightFence, VK_TRUE, UINT64_MAX));
+
         
         // Acquire the next image from the swapchain
         try {
@@ -425,6 +468,21 @@ namespace Renderer {
                 UINT64_MAX, **m_ImageAvailableSemaphore, nullptr);
             if (acquireResult == vk::Result::eSuboptimalKHR) {
                 m_SubOptimal = true;
+            }
+            // Get last frame's timestamps if GPU timing is enabled
+            if (m_GpuTimingEnabled && m_HasTimestampQueryPoolResults) {
+                auto [result, ticks] = m_TimestampQueryPool->getResults<uint64_t>(
+                0,                          // firstQuery: start at slot 0
+                2,                          // queryCount: read slots 0 and 1
+                2 * sizeof(uint64_t),       // dataSize: total bytes for the whole output (16)
+                sizeof(uint64_t),           // stride: bytes from one result to the next (8)
+                vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
+
+                if (result == vk::Result::eSuccess) {
+                    uint64_t elapsedTicks = ticks[1] - ticks[0];
+                    m_LastGpuFrameMs = elapsedTicks * m_TimestampPeriodNs / 1'000'000.0f;
+                    LOG_INFO("VulkanRenderer", "GPU frame time: {} ms", m_LastGpuFrameMs);
+                }
             }
             BeginFrame(imageIndex);
 
@@ -1189,6 +1247,13 @@ namespace Renderer {
                 LOG_WARN("VulkanRenderer", "  ❌ Missing required queue families");
                 return false;
             }
+            // TODO: Don't set members inside a suitability check. It works only because
+            // find_if stops at the first passing device, so the chosen device writes last.
+            // Have the check return the indices (and the depth format, set the same way
+            // below), then assign them once after m_PhysicalDevice = *deviceIter.
+            // value_or is unneeded here: isComplete() already guarantees both values.
+            m_GraphicsQueueFamilyIdx = indices.graphicsFamily.value_or(UINT32_MAX);
+            m_PresentQueueFamilyIdx = indices.presentFamily.value_or(UINT32_MAX);
 
             LOG_INFO("VulkanRenderer", "  ✓ Graphics queue family found {}", indices.graphicsFamily.value());
             LOG_INFO("VulkanRenderer", "  ✓ Present queue family found {}", indices.presentFamily.value());

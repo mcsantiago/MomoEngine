@@ -41,6 +41,8 @@ private:
     void CreateInFlightFence();
     void CreateRenderFinishedSemaphores();
     void CreateTextureSampler();
+    void CreateTimestampQueryPool();
+    void CheckTimestampSupport();
     void CreateDescriptorSetLayout();
     void WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedBuffer& ubo, const AllocatedImage& textureImage);
 
@@ -80,6 +82,7 @@ private:
     // Graphics pipeline
     std::optional<vk::raii::PipelineLayout> m_PipelineLayout;
     std::optional<vk::raii::Pipeline> m_GraphicsPipeline;
+    std::optional<vk::raii::QueryPool> m_TimestampQueryPool;
 
     // Command buffers
     std::optional<vk::raii::CommandPool> m_CommandPool;
@@ -90,6 +93,10 @@ private:
     std::vector<vk::raii::Semaphore> m_RenderFinishedSemaphores;
     std::optional<vk::raii::Fence> m_InFlightFence;
 
+    bool m_HasTimestampQueryPoolResults = false;
+    double m_LastGpuFrameMs = 0;
+    float m_TimestampPeriodNs = 0.0f;   // nanoseconds per timestamp tick
+    bool  m_GpuTimingEnabled = false;   // false = skip every timestamp call later
     uint32_t m_GraphicsQueueFamilyIdx = 0;
     uint32_t m_PresentQueueFamilyIdx = 0;
     std::optional<vk::raii::Queue> m_GraphicsQueue;
