@@ -1,6 +1,9 @@
 #include "Momo/Core/Application.h"
+#include "Momo/Profiling/Timer.h"
+#include "Momo/Profiling/FrameStats.h"
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Renderer/VulkanMeshData.h"
+#include "Momo/Renderer/VulkanRenderer.h"
 #include <chrono>
 #include <Momo/Logging/Logger.h>
 #include <glm/glm.hpp>
@@ -59,14 +62,17 @@ namespace Momo
     {
         using clock = std::chrono::steady_clock;
         auto last = clock::now();
+        auto frameStats = Profiling::FrameTime{};
+        Profiling::FrameStatsAccumulator statsAccumulator;
+        auto statsWindowStart = last;
+        Profiling::Timer updateTimer;
 
 
         while (m_Running && !m_Window->ShouldClose())
         {
             auto now = clock::now();
-            float dt = std::chrono::duration<float>(now - last).count();
+            float dt = std::chrono::duration<float>(now - last).count(); // default to seconds
             m_TotalTime += dt;
-            LOG_INFO("Momo", "Frame time: {}", dt);
             last = now;
 
             m_Window->PollEvents();
@@ -78,23 +84,43 @@ namespace Momo
                 break;
             }
 
+            updateTimer.Start();
             for (auto& layer : m_Layers)
                 layer->OnUpdate(dt);
 
             m_Camera->OnUpdate(dt, m_InputState);
-            Draw(dt);
-            // crude temporary limiter so the console doesn't spam
-            // std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            updateTimer.End();
+
+            auto drawFrameTime = Draw(dt);
+
+            frameStats.frame        = m_FrameCount;
+            frameStats.cpuTotalMs   = std::chrono::duration<float, std::milli>(clock::now() - now).count();
+            frameStats.updateMs     = updateTimer.GetElapsedTimeInMs();
+            frameStats.submitMs     = drawFrameTime.has_value() ? drawFrameTime->submitMs : 0.0f;
+            frameStats.recordMs     = drawFrameTime.has_value() ? drawFrameTime->recordMs : 0.0f;
+            frameStats.fenceWaitMs  = drawFrameTime.has_value() ? drawFrameTime->fenceWaitMs : 0.0f;
+            frameStats.gpuMs        = drawFrameTime.has_value() ? drawFrameTime->gpuFrameMs : 0.0f;
+            statsAccumulator.Add(frameStats);
+
+            // Log a summary roughly once per second instead of every frame
+            double statsWindowSeconds = std::chrono::duration<double>(clock::now() - statsWindowStart).count();
+            if (statsWindowSeconds >= 1.0)
+            {
+                statsAccumulator.LogAndReset(statsWindowSeconds);
+                statsWindowStart = clock::now();
+            }
+
+            m_FrameCount++;
         }
     }
 
-    void Application::Draw(float dt)
+    std::optional<Renderer::DrawFrameTime> Application::Draw(float dt)
     {
         // TODO: Should be a dedicated entity.OnUpdate(dt) call instead of directly manipulating the model matrix here
         // Construct VulkanModelData for each scene
         if (!m_ActiveScene.has_value()) {
             LOG_ERROR("Momo", "No active scene loaded.");
-            return;
+            return std::nullopt;
         }
 
         // TODO: This doesn't have to be done every frame, but for now it's a simple way to ensure the data is up-to-date
@@ -116,7 +142,8 @@ namespace Momo
         glm::mat4 modelMatrix = glm::mat4(1.0f); // Identity for now, should be replaced with actual entity transform
         LOG_TRACE("Momo", "Model matrix: {}", glm::to_string(modelMatrix));
 
-        m_Renderer.RenderFrame(vulkanModelData, m_Camera->GetViewMatrix(), modelMatrix);
+        Renderer::DrawFrameTime renderFrameTime = m_Renderer.RenderFrame(vulkanModelData, m_Camera->GetViewMatrix(), modelMatrix);
+        return renderFrameTime;
     }
 
     void Application::Shutdown()

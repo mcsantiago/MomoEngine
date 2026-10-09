@@ -52,6 +52,8 @@ namespace Momo
         bool m_IsShutdown = false;
         float m_TotalTime = 0.0f;
         float m_CubeRotationSpeed = 1.0f; // radians per second (Should be moved to the scene or entity)
+        
+        uint64_t m_FrameCount = 0;
         Input::InputState m_InputState;
 
         std::unique_ptr<IWindow> m_Window;
@@ -70,7 +72,7 @@ namespace Momo
         Renderer::MaterialGPUCache m_MaterialCache;
 
         Renderer::VulkanModelData LoadMesh(const std::filesystem::path &path);
-        void Draw(float dt);
+        std::optional<Renderer::DrawFrameTime> Draw(float dt);
         void LoadScene(const std::filesystem::path &path);
         void LoadDefaultAssets();
     };

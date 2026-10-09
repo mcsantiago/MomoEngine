@@ -193,8 +193,8 @@ namespace Renderer {
         CreateGraphicsPipeline();
         LOG_DEBUG("VulkanRenderer", "Creating command pool...");
         CreateCommandPool();
-        LOG_DEBUG("VulkanRenderer", "Creating command buffer...");
-        CreateCommandBuffer();
+        LOG_DEBUG("VulkanRenderer", "Creating command buffers...");
+        CreateCommandBuffers();
         LOG_DEBUG("VulkanRenderer", "Creating synchronization objects...");
         CreateSyncObjects();
         LOG_DEBUG("VulkanRenderer", "Creating texture sampler...");
@@ -225,7 +225,7 @@ namespace Renderer {
         }
         vk::QueryPoolCreateInfo queryPoolInfo{};
         queryPoolInfo.queryType = vk::QueryType::eTimestamp;
-        queryPoolInfo.queryCount = 2; // Start and end timestamps
+        queryPoolInfo.queryCount = 2 * MAX_FRAMES_IN_FLIGHT; // Start and end timestamps for each frame in flight
         m_TimestampQueryPool = vk::raii::QueryPool(*m_Device, queryPoolInfo);
         LOG_DEBUG("VulkanRenderer", "Created timestamp query pool with {} queries.", queryPoolInfo.queryCount);
     }
@@ -322,15 +322,16 @@ namespace Renderer {
         LOG_DEBUG("VulkanRenderer", "Beginning a frame...");
         
         // Reset the fence to indicate that the GPU is now using it for the current frame
-        m_Device->resetFences(**m_InFlightFence);
+        m_Device->resetFences(*m_InFlightFences[m_CurrentFrame]);
 
         // Record command buffer for the acquired image
-        m_CommandBuffer->reset();
-        m_CommandBuffer->begin({});
+        m_CommandBuffers[m_CurrentFrame].reset();
+        m_CommandBuffers[m_CurrentFrame].begin({});
 
         if (m_GpuTimingEnabled) {
-            m_CommandBuffer->resetQueryPool(**m_TimestampQueryPool, 0, 2);
-            m_CommandBuffer->writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, **m_TimestampQueryPool, 0);
+            uint32_t firstQuery = m_CurrentFrame * 2;
+            m_CommandBuffers[m_CurrentFrame].resetQueryPool(**m_TimestampQueryPool, firstQuery, 2);
+            m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, **m_TimestampQueryPool, firstQuery);
         }
 
         vk::ImageMemoryBarrier2 toColorAttachment{};
@@ -350,8 +351,9 @@ namespace Renderer {
         };
 
         vk::ImageMemoryBarrier2 toDepthAttachment{};
-        toDepthAttachment.srcStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests;
-        toDepthAttachment.srcAccessMask = {};
+        // The depth buffer is shared by all frames in flight, so wait for the previous frame's depth writes
+        toDepthAttachment.srcStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests;
+        toDepthAttachment.srcAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
         toDepthAttachment.dstStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests;
         toDepthAttachment.dstAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
         toDepthAttachment.oldLayout = vk::ImageLayout::eUndefined;
@@ -370,7 +372,7 @@ namespace Renderer {
         vk::ImageMemoryBarrier2 imageBarriers[] = { toColorAttachment, toDepthAttachment };
         dependencyInfo.pImageMemoryBarriers = imageBarriers;
 
-        m_CommandBuffer->pipelineBarrier2(dependencyInfo);
+        m_CommandBuffers[m_CurrentFrame].pipelineBarrier2(dependencyInfo);
 
         // Begin rendering
         vk::ClearValue clearColor = vk::ClearValue().setColor(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f});
@@ -395,7 +397,7 @@ namespace Renderer {
         renderingInfo.pColorAttachments = &colorAttachment;
         renderingInfo.pDepthAttachment = &depthAttachment;
 
-        m_CommandBuffer->beginRendering(renderingInfo);
+        m_CommandBuffers[m_CurrentFrame].beginRendering(renderingInfo);
     }
 
     void VulkanRenderer::EndFrame(uint32_t imageIndex)
@@ -403,7 +405,7 @@ namespace Renderer {
         // Implementation for ending a frame
         LOG_DEBUG("VulkanRenderer", "Ending a frame...");
 
-        m_CommandBuffer->endRendering();
+        m_CommandBuffers[m_CurrentFrame].endRendering();
 
         // Transition the swapchain image to present layout
         vk::ImageMemoryBarrier2 toPresent{};
@@ -424,22 +426,27 @@ namespace Renderer {
         presentDependency.imageMemoryBarrierCount = 1;
         presentDependency.pImageMemoryBarriers = &toPresent;
 
-        m_CommandBuffer->pipelineBarrier2(presentDependency);
+        m_CommandBuffers[m_CurrentFrame].pipelineBarrier2(presentDependency);
         if (m_GpuTimingEnabled) {
-            m_CommandBuffer->writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, **m_TimestampQueryPool, 1);
+            m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, **m_TimestampQueryPool, m_CurrentFrame * 2 + 1);
         }
-        m_CommandBuffer->end();
+        m_CommandBuffers[m_CurrentFrame].end();
+        m_RecordTimer.End();
 
+        m_SubmitTimer.Start();
         // Submit and present
-        vk::Semaphore waitSemaphores[]   = { **m_ImageAvailableSemaphore };
+        vk::Semaphore waitSemaphores[]   = { *m_ImageAvailableSemaphores[m_CurrentFrame] };
         vk::Semaphore signalSemaphores[] = { *m_RenderFinishedSemaphores[imageIndex] };
         vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
 
-        vk::SubmitInfo submitInfo(waitSemaphores, waitStages, **m_CommandBuffer, signalSemaphores);
-        m_GraphicsQueue->submit(submitInfo, **m_InFlightFence);
+        vk::SubmitInfo submitInfo(waitSemaphores, waitStages, *m_CommandBuffers[m_CurrentFrame], signalSemaphores);
+        m_GraphicsQueue->submit(submitInfo, *m_InFlightFences[m_CurrentFrame]);
         if (m_GpuTimingEnabled) {
-            m_HasTimestampQueryPoolResults = true;
+            m_HasTimestampQueryPoolResults[m_CurrentFrame] = true;
         }
+
+        // The submit is done, so move to the next frame's resources even if present fails below
+        m_CurrentFrame = (m_CurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 
         vk::PresentInfoKHR presentInfo(signalSemaphores, **m_Swapchain, imageIndex);
         auto presentResult = m_PresentQueue->presentKHR(presentInfo);
@@ -447,10 +454,13 @@ namespace Renderer {
         if (presentResult == vk::Result::eSuboptimalKHR) {
             m_SubOptimal = true;
         }
+        m_SubmitTimer.End();
     }
 
-    void VulkanRenderer::RenderFrame(VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix)
+    DrawFrameTime VulkanRenderer::RenderFrame(VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix)
     {
+        DrawFrameTime frameTime{};
+
         // Implementation for rendering a single frame using Vulkan
         LOG_DEBUG("VulkanRenderer", "Rendering a frame...");
         if (m_SubOptimal) {
@@ -458,23 +468,26 @@ namespace Renderer {
             RecreateSwapchain();
         }
 
-        // Wait for fences
+        m_FenceWaitTimer.Start();
+        // Wait until the GPU is done with this frame slot's resources (submitted MAX_FRAMES_IN_FLIGHT frames ago)
         while (vk::Result::eTimeout == 
-            m_Device->waitForFences(**m_InFlightFence, VK_TRUE, UINT64_MAX));
+            m_Device->waitForFences(*m_InFlightFences[m_CurrentFrame], VK_TRUE, UINT64_MAX));
+        m_FenceWaitTimer.End();
 
         
         // Acquire the next image from the swapchain
         try {
+            m_RecordTimer.Start();
             auto [acquireResult, imageIndex] = m_Swapchain->acquireNextImage(
-                UINT64_MAX, **m_ImageAvailableSemaphore, nullptr);
+                UINT64_MAX, *m_ImageAvailableSemaphores[m_CurrentFrame], nullptr);
             if (acquireResult == vk::Result::eSuboptimalKHR) {
                 m_SubOptimal = true;
             }
-            // Get last frame's timestamps if GPU timing is enabled
-            if (m_GpuTimingEnabled && m_HasTimestampQueryPoolResults) {
+            // Get the timestamps written the last time this frame slot was used, if GPU timing is enabled
+            if (m_GpuTimingEnabled && m_HasTimestampQueryPoolResults[m_CurrentFrame]) {
                 auto [result, ticks] = m_TimestampQueryPool->getResults<uint64_t>(
-                0,                          // firstQuery: start at slot 0
-                2,                          // queryCount: read slots 0 and 1
+                m_CurrentFrame * 2,         // firstQuery: this frame slot's start timestamp
+                2,                          // queryCount: read the start and end timestamps
                 2 * sizeof(uint64_t),       // dataSize: total bytes for the whole output (16)
                 sizeof(uint64_t),           // stride: bytes from one result to the next (8)
                 vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
@@ -482,51 +495,59 @@ namespace Renderer {
                 if (result == vk::Result::eSuccess) {
                     uint64_t elapsedTicks = (ticks[1] - ticks[0]) & m_TimestampValidBitmask;
                     m_LastGpuFrameMs = elapsedTicks * m_TimestampPeriodNs / 1'000'000.0f;
-                    LOG_INFO("VulkanRenderer", "GPU frame time: {} ms", m_LastGpuFrameMs);
+                    LOG_TRACE("VulkanRenderer", "GPU frame time: {} ms", m_LastGpuFrameMs);
                 }
             }
             BeginFrame(imageIndex);
 
             // Draw
-            m_CommandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, **m_GraphicsPipeline);
-            m_CommandBuffer->setViewport(0, vk::Viewport(
+            m_CommandBuffers[m_CurrentFrame].bindPipeline(vk::PipelineBindPoint::eGraphics, **m_GraphicsPipeline);
+            m_CommandBuffers[m_CurrentFrame].setViewport(0, vk::Viewport(
                 0.0f, 0.0f, 
                 static_cast<float>(m_SwapchainExtent.width), 
                 static_cast<float>(m_SwapchainExtent.height), 
                 0.0f, 1.0f));
 
-            m_CommandBuffer->setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
+            m_CommandBuffers[m_CurrentFrame].setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
 
             for (const auto& mesh : modelData.meshes) {
-                m_CommandBuffer->setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
-                m_CommandBuffer->bindDescriptorSets(
+                m_CommandBuffers[m_CurrentFrame].setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
+                m_CommandBuffers[m_CurrentFrame].bindDescriptorSets(
                         vk::PipelineBindPoint::eGraphics, 
                         **m_PipelineLayout, 
                         0, 
                         {mesh.materialData.descriptorSet}, 
                         nullptr
                 );
-                m_CommandBuffer->bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
-                m_CommandBuffer->bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
+                m_CommandBuffers[m_CurrentFrame].bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
+                m_CommandBuffers[m_CurrentFrame].bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
                 PushConstantData pushConstantData;
                 pushConstantData.projectionMatrix = m_ProjectionMatrix;
                 pushConstantData.viewMatrix = viewMatrix;
                 pushConstantData.modelMatrix = modelMatrix * mesh.localTransform; // Move to GPU..?
-                m_CommandBuffer->pushConstants<PushConstantData>(
+                m_CommandBuffers[m_CurrentFrame].pushConstants<PushConstantData>(
                     **m_PipelineLayout, 
                     vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 
                     0,
                     pushConstantData
                 );
-                m_CommandBuffer->drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0); // Draw a quad using indices
+                m_CommandBuffers[m_CurrentFrame].drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0); 
             }
 
             EndFrame(imageIndex);
+            frameTime.gpuFrameMs = m_LastGpuFrameMs;
+            frameTime.fenceWaitMs = m_FenceWaitTimer.GetElapsedTimeInMs();
+            frameTime.recordMs = m_RecordTimer.GetElapsedTimeInMs();
+            frameTime.submitMs = m_SubmitTimer.GetElapsedTimeInMs();
         } catch (const vk::OutOfDateKHRError& e) {
+            m_RecordTimer = Profiling::Timer(); // Reset the record timer to avoid negative values in the next frame
+            m_SubmitTimer = Profiling::Timer(); 
+
             LOG_DEBUG("VulkanRenderer", "Swapchain is out of date. Need to recreate swapchain.");
             RecreateSwapchain();
         }
-
+        
+        return frameTime;
     }
 
     uint32_t VulkanRenderer::FindMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties)
@@ -979,17 +1000,16 @@ namespace Renderer {
         LOG_INFO("VulkanRenderer", "Command pool created");
     }
 
-    void VulkanRenderer::CreateCommandBuffer()
+    void VulkanRenderer::CreateCommandBuffers()
     {
         vk::CommandBufferAllocateInfo allocInfo(
             *m_CommandPool,                      // commandPool
             vk::CommandBufferLevel::ePrimary,   // level - can be submitted directly to queue
-            1                                    // commandBufferCount
+            MAX_FRAMES_IN_FLIGHT                 // commandBufferCount
         );
 
-        auto commandBuffers = vk::raii::CommandBuffers(m_Device.value(), allocInfo);
-        m_CommandBuffer = std::move(commandBuffers[0]);
-        LOG_INFO("VulkanRenderer", "Command buffer allocated");
+        m_CommandBuffers = vk::raii::CommandBuffers(m_Device.value(), allocInfo);
+        LOG_INFO("VulkanRenderer", "{} command buffers allocated", m_CommandBuffers.size());
     }
 
     vk::raii::ShaderModule VulkanRenderer::CreateShaderModule(const std::vector<char>& code)
@@ -1106,6 +1126,9 @@ namespace Renderer {
         LOG_DEBUG("VulkanRenderer", "Recreating swapchain...");
         // Actual swapchain recreation logic goes here
 
+        // Frames in flight may still be using the depth buffer and swapchain images we're about to replace
+        m_Device->waitIdle();
+
         auto surfaceCapabilities = m_PhysicalDevice->getSurfaceCapabilitiesKHR(*m_Surface);
         m_SwapchainExtent = ChooseSwapExtent(surfaceCapabilities, m_Window->GetWidth(), m_Window->GetHeight());
         m_DepthBuffer = CreateDepthBuffer();
@@ -1118,8 +1141,7 @@ namespace Renderer {
         }
 
         LOG_DEBUG("VulkanRenderer", "\tm_SwapchainExtent recreated: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
-        
-        m_Device->waitIdle();
+
         m_SwapchainImageViews.clear();
         LOG_DEBUG("VulkanRenderer", "\tCleared swapchain image views for new extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
         CreateSwapChain();
@@ -1444,8 +1466,8 @@ namespace Renderer {
 
     void VulkanRenderer::CreateSyncObjects()
     {
-        CreateImageAvailableSemaphore();
-        CreateInFlightFence();
+        CreateImageAvailableSemaphores();
+        CreateInFlightFences();
         CreateRenderFinishedSemaphores();
     }
 
@@ -1457,17 +1479,21 @@ namespace Renderer {
             m_RenderFinishedSemaphores.push_back(vk::raii::Semaphore(m_Device.value(), semaphoreInfo));
     }
 
-    void VulkanRenderer::CreateImageAvailableSemaphore()
+    void VulkanRenderer::CreateImageAvailableSemaphores()
     {
+        m_ImageAvailableSemaphores.clear();
         vk::SemaphoreCreateInfo semaphoreInfo{};
-        m_ImageAvailableSemaphore = vk::raii::Semaphore(m_Device.value(), semaphoreInfo);
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+            m_ImageAvailableSemaphores.push_back(vk::raii::Semaphore(m_Device.value(), semaphoreInfo));
     }
 
-    void VulkanRenderer::CreateInFlightFence()
+    void VulkanRenderer::CreateInFlightFences()
     {
+        m_InFlightFences.clear();
         vk::FenceCreateInfo fenceInfo{};
-        fenceInfo.flags = vk::FenceCreateFlagBits::eSignaled;
-        m_InFlightFence = vk::raii::Fence(m_Device.value(), fenceInfo);
+        fenceInfo.flags = vk::FenceCreateFlagBits::eSignaled; // Start signaled so the first frame can be rendered without waiting
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+            m_InFlightFences.push_back(vk::raii::Fence(m_Device.value(), fenceInfo));
     }
 } // namespace Renderer
 } // namespace Momo

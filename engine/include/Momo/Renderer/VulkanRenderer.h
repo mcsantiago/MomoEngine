@@ -1,6 +1,7 @@
 #pragma once
 #include <vulkan/vulkan_raii.hpp>
 #include <vector>
+#include <array>
 #include <optional>
 #include <cstdint>
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE // Vulkan depth [0, 1] range
@@ -10,16 +11,23 @@
 #include "VulkanMeshData.h"
 #include "Momo/Assets/ModelData.h"
 #include "Momo/Renderer/DescriptorAllocator.h"
+#include "Momo/Profiling/Timer.h"
 
 namespace Momo {
 namespace Renderer {
+struct DrawFrameTime
+{
+    float recordMs, submitMs, fenceWaitMs, gpuFrameMs;
+};
 
 class VulkanRenderer
 {
 public:
+    static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+
     void Init(const IWindow& window);
     void Shutdown();
-    void RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix);
+    DrawFrameTime RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix);
 
     AllocatedBuffer     CreateVertexBuffer(const std::vector<Momo::Geometry::Vertex>& vertices);
     AllocatedBuffer     CreateIndexBuffer(const std::vector<uint32_t>& indices);
@@ -35,10 +43,10 @@ private:
     void CreateImageView();
     void CreateGraphicsPipeline();
     void CreateCommandPool();
-    void CreateCommandBuffer();
+    void CreateCommandBuffers();
     void CreateSyncObjects();
-    void CreateImageAvailableSemaphore();
-    void CreateInFlightFence();
+    void CreateImageAvailableSemaphores();
+    void CreateInFlightFences();
     void CreateRenderFinishedSemaphores();
     void CreateTextureSampler();
     void CreateTimestampQueryPool();
@@ -84,16 +92,17 @@ private:
     std::optional<vk::raii::Pipeline> m_GraphicsPipeline;
     std::optional<vk::raii::QueryPool> m_TimestampQueryPool;
 
-    // Command buffers
+    // Command buffers (one per frame in flight)
     std::optional<vk::raii::CommandPool> m_CommandPool;
-    std::optional<vk::raii::CommandBuffer> m_CommandBuffer;
+    std::vector<vk::raii::CommandBuffer> m_CommandBuffers;
 
     // Sync objects
-    std::optional<vk::raii::Semaphore> m_ImageAvailableSemaphore;
-    std::vector<vk::raii::Semaphore> m_RenderFinishedSemaphores;
-    std::optional<vk::raii::Fence> m_InFlightFence;
+    std::vector<vk::raii::Semaphore> m_ImageAvailableSemaphores;   // one per frame in flight
+    std::vector<vk::raii::Semaphore> m_RenderFinishedSemaphores;   // one per swapchain image
+    std::vector<vk::raii::Fence> m_InFlightFences;                 // one per frame in flight
+    uint32_t m_CurrentFrame = 0;
 
-    bool m_HasTimestampQueryPoolResults = false;
+    std::array<bool, MAX_FRAMES_IN_FLIGHT> m_HasTimestampQueryPoolResults{};
     uint64_t m_TimestampValidBitmask = 0;
     double m_LastGpuFrameMs = 0;
     float m_TimestampPeriodNs = 0.0f;   // nanoseconds per timestamp tick
@@ -129,6 +138,9 @@ private:
     std::vector<const char*> m_EnabledDeviceExtensions;
 
     glm::mat4 m_ProjectionMatrix;
+
+    // Debug Timers
+    Profiling::Timer m_RecordTimer, m_SubmitTimer, m_FenceWaitTimer;
 };
 } // namespace Renderer
 } // namespace Momo
