@@ -45,9 +45,16 @@ struct Material {
 static const uint MaxTextures = 256;
 [vk::binding(5, 0)] Sampler2D baseColorTextures[MaxTextures];
 
+// Running average of every sample since the camera last moved
+[vk::binding(6, 0)] [format("rgba32f")] RWTexture2D<float4> accumulationImage;
+
+// Matches RayTracingPushConstants in VulkanRenderer.h
 struct PushConstants {
-    float4x4 inverseView;
-    float4x4 inverseProjection;
+    float4x4 inverseViewProjection; // NDC -> world
+    float4   cameraPosition;        // w unused
+    uint     frameIndex;            // Seeds the random numbers; changes every frame
+    uint     sampleCount;           // Samples in the average including this one; 1 = start over
+    uint2    padding;
 };
 [vk::push_constant] ConstantBuffer<PushConstants> pc;
 
@@ -259,6 +266,22 @@ float3 Shade(Ray ray, Hit hit)
     return baseColor * (0.15 + 0.85 * diffuse);
 }
 
+// PCG hash (Jarzynski & Olano, "Hash Functions for GPU Rendering", 2020):
+// cheap, and good enough that neighboring seeds give unrelated numbers
+uint PcgHash(uint value)
+{
+    uint state = value * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Uniform in [0, 1). Uses the top 24 bits, which a float represents exactly
+float NextRandom(inout uint rngState)
+{
+    rngState = PcgHash(rngState);
+    return float(rngState >> 8) * (1.0 / 16777216.0);
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void compMain(uint3 threadId : SV_DispatchThreadID)
@@ -268,16 +291,32 @@ void compMain(uint3 threadId : SV_DispatchThreadID)
     if (threadId.x >= size.x || threadId.y >= size.y)
         return;
 
-    // Pixel center -> NDC -> a point on the far plane in view space. The
-    // projection already flips Y for Vulkan, so row 0 maps to the top.
-    float2 ndc = (float2(threadId.xy) + 0.5) / float2(size) * 2.0 - 1.0;
-    float4 target = mul(pc.inverseProjection, float4(ndc, 1.0, 1.0));
+    // A different random sequence for every pixel and every frame
+    uint rngState = PcgHash(threadId.x + PcgHash(threadId.y + PcgHash(pc.frameIndex)));
+
+    // A random point inside the pixel rather than its center: averaged over
+    // frames, edges come out smooth (antialiasing). Then NDC -> a world-space
+    // point on the far plane. The projection already flips Y for Vulkan, so
+    // row 0 maps to the top.
+    float2 jitter = float2(NextRandom(rngState), NextRandom(rngState));
+    float2 ndc = (float2(threadId.xy) + jitter) / float2(size) * 2.0 - 1.0;
+    float4 target = mul(pc.inverseViewProjection, float4(ndc, 1.0, 1.0));
 
     Ray ray;
-    ray.origin = mul(pc.inverseView, float4(0.0, 0.0, 0.0, 1.0)).xyz;
-    ray.direction = normalize(mul(pc.inverseView, float4(target.xyz / target.w, 0.0)).xyz);
+    ray.origin = pc.cameraPosition.xyz;
+    ray.direction = normalize(target.xyz / target.w - ray.origin);
 
     Hit hit;
     float3 color = IntersectScene(ray, 0.0, Infinity, false, hit) ? Shade(ray, hit) : Sky(ray.direction);
-    outputImage[threadId.xy] = float4(color, 1.0);
+
+    // Fold this sample into the running average: after n samples each one
+    // has weight 1/n, without storing them all
+    float3 average = color;
+    if (pc.sampleCount > 1)
+    {
+        float3 previous = accumulationImage[threadId.xy].rgb;
+        average = previous + (color - previous) / float(pc.sampleCount);
+    }
+    accumulationImage[threadId.xy] = float4(average, 1.0);
+    outputImage[threadId.xy] = float4(average, 1.0);
 }

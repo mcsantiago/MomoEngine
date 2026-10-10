@@ -27,13 +27,16 @@ enum class RenderMode
     RayTraced
 };
 
-// Push constants of raytrace.slang: enough to rebuild each pixel's camera ray
+// Push constants of raytrace.slang (std430-compatible; at most the guaranteed 128 bytes)
 struct RayTracingPushConstants
 {
-    glm::mat4 inverseView;
-    glm::mat4 inverseProjection;
+    glm::mat4 inverseViewProjection; // NDC -> world, to build each pixel's camera ray
+    glm::vec4 cameraPosition;        // w unused
+    uint32_t  frameIndex;            // Changes every ray traced frame; seeds the random numbers
+    uint32_t  sampleCount;           // Samples in the running average including this frame; 1 = start over
+    uint32_t  padding[2] = { 0, 0 };
 };
-static_assert(sizeof(RayTracingPushConstants) == 128, "RayTracingPushConstants must fit the guaranteed 128 bytes");
+static_assert(sizeof(RayTracingPushConstants) == 96, "RayTracingPushConstants must match raytrace.slang");
 
 // GPU copies of RayTracing::SceneGeometry, in device-local storage buffers
 struct RayTracingSceneBuffers
@@ -93,7 +96,8 @@ private:
     // Ray tracing (VulkanRayTracing.cpp)
     void CheckRayTracingSupport();
     void CreateRayTracingPipeline();
-    void CreateRayTracingOutputImage();
+    void CreateRayTracingImages();
+    AllocatedImage CreateRayTracingStorageImage(vk::Format format, vk::ImageUsageFlags usage);
     void WriteRayTracingDescriptorSet();
     void RecordRayTracingPass(uint32_t imageIndex, const glm::mat4& viewMatrix);
     AllocatedBuffer CreateDeviceLocalBuffer(const void* data, vk::DeviceSize size, vk::BufferUsageFlags usage);
@@ -177,6 +181,13 @@ private:
     // Shared by all frames in flight, like the depth buffer; sized to the swapchain
     std::optional<AllocatedImage> m_RayTracingOutput;
     static constexpr vk::Format RayTracingOutputFormat = vk::Format::eR16G16B16A16Sfloat;
+    // Running average of every sample since the camera last moved. 32-bit:
+    // averaging hundreds of samples in 16-bit floats loses precision
+    std::optional<AllocatedImage> m_RayTracingAccumulation;
+    static constexpr vk::Format RayTracingAccumulationFormat = vk::Format::eR32G32B32A32Sfloat;
+    uint32_t m_AccumulatedSamples = 0; // 0 = the next frame starts a new average
+    uint32_t m_RayTracingFrameIndex = 0;
+    glm::mat4 m_AccumulationViewProjection{ 0.0f }; // Camera the running average was made with
 
     // Intended for use when setting up Vulkan validation layers in instance creation.
     std::vector<char const*> m_ValidationLayers = {

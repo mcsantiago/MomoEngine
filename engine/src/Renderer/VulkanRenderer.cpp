@@ -195,7 +195,7 @@ namespace Renderer {
         CheckRayTracingSupport();
         if (m_RayTracingSupported) {
             CreateRayTracingPipeline();
-            CreateRayTracingOutputImage();
+            CreateRayTracingImages();
         }
         LOG_DEBUG("VulkanRenderer", "Creating command pool...");
         CreateCommandPool();
@@ -1188,7 +1188,7 @@ namespace Renderer {
         CreateRenderFinishedSemaphores();
         LOG_DEBUG("VulkanRenderer", "\tCreated new render finished semaphores for extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
         if (m_RayTracingSupported) {
-            CreateRayTracingOutputImage();
+            CreateRayTracingImages();
             if (m_RayTracingDescriptorSet) {
                 WriteRayTracingDescriptorSet();
             }

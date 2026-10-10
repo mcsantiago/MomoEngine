@@ -47,6 +47,12 @@ namespace Renderer {
             return;
         }
 
+        auto accumulationFeatures = m_PhysicalDevice->getFormatProperties(RayTracingAccumulationFormat).optimalTilingFeatures;
+        if (!(accumulationFeatures & vk::FormatFeatureFlagBits::eStorageImage)) {
+            LOG_WARN("VulkanRenderer", "{} can't be a storage image. Ray tracing disabled.", vk::to_string(RayTracingAccumulationFormat));
+            return;
+        }
+
         m_RayTracingSupported = true;
         LOG_INFO("VulkanRenderer", "Compute ray tracing supported");
     }
@@ -54,8 +60,9 @@ namespace Renderer {
     void VulkanRenderer::CreateRayTracingPipeline()
     {
         // Bindings 0-3: BVH nodes, triangle positions, triangle shading, materials.
-        // 4: output image. 5: the scene's base color textures, as an array
-        std::array<vk::DescriptorSetLayoutBinding, 6> bindings{};
+        // 4: output image. 5: the scene's base color textures, as an array.
+        // 6: accumulation image (running average across frames)
+        std::array<vk::DescriptorSetLayoutBinding, 7> bindings{};
         for (uint32_t i = 0; i < bindings.size(); i++) {
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
@@ -65,6 +72,7 @@ namespace Renderer {
         bindings[4].descriptorType = vk::DescriptorType::eStorageImage;
         bindings[5].descriptorType = vk::DescriptorType::eCombinedImageSampler;
         bindings[5].descriptorCount = RayTracing::MaxRayTracingTextures;
+        bindings[6].descriptorType = vk::DescriptorType::eStorageImage;
         vk::DescriptorSetLayoutCreateInfo layoutInfo({}, bindings);
         m_RayTracingSetLayout = vk::raii::DescriptorSetLayout(*m_Device, layoutInfo);
 
@@ -73,7 +81,7 @@ namespace Renderer {
             .maxSets = 1,
             .sizes = {
                 { vk::DescriptorType::eStorageBuffer, 4 },
-                { vk::DescriptorType::eStorageImage, 1 },
+                { vk::DescriptorType::eStorageImage, 2 },
                 { vk::DescriptorType::eCombinedImageSampler, RayTracing::MaxRayTracingTextures },
             },
         });
@@ -93,18 +101,18 @@ namespace Renderer {
         LOG_INFO("VulkanRenderer", "Ray tracing pipeline created successfully");
     }
 
-    void VulkanRenderer::CreateRayTracingOutputImage()
+    AllocatedImage VulkanRenderer::CreateRayTracingStorageImage(vk::Format format, vk::ImageUsageFlags usage)
     {
         auto image = vk::raii::Image(*m_Device, vk::ImageCreateInfo(
             {},
             vk::ImageType::e2D,
-            RayTracingOutputFormat,
+            format,
             vk::Extent3D{ m_SwapchainExtent.width, m_SwapchainExtent.height, 1 },
             1,
             1,
             vk::SampleCountFlagBits::e1,
             vk::ImageTiling::eOptimal,
-            vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+            vk::ImageUsageFlagBits::eStorage | usage,
             vk::SharingMode::eExclusive,
             0,
             nullptr,
@@ -119,13 +127,21 @@ namespace Renderer {
             {},
             *image,
             vk::ImageViewType::e2D,
-            RayTracingOutputFormat,
+            format,
             {},
             vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
         );
         auto imageView = vk::raii::ImageView(*m_Device, viewInfo);
 
-        m_RayTracingOutput.emplace(AllocatedImage{ std::move(imageMemory), std::move(image), std::move(imageView), m_SwapchainExtent.width, m_SwapchainExtent.height });
+        return AllocatedImage{ std::move(imageMemory), std::move(image), std::move(imageView), m_SwapchainExtent.width, m_SwapchainExtent.height };
+    }
+
+    void VulkanRenderer::CreateRayTracingImages()
+    {
+        m_RayTracingOutput.emplace(CreateRayTracingStorageImage(RayTracingOutputFormat, vk::ImageUsageFlagBits::eTransferSrc));
+        m_RayTracingAccumulation.emplace(CreateRayTracingStorageImage(RayTracingAccumulationFormat, {}));
+        // The old running average was for the old size
+        m_AccumulatedSamples = 0;
     }
 
     AllocatedBuffer VulkanRenderer::CreateDeviceLocalBuffer(const void* data, vk::DeviceSize size, vk::BufferUsageFlags usage)
@@ -189,6 +205,7 @@ namespace Renderer {
             .stats = geometry.bvh.stats,
         });
         m_RayTracingTextureViews = std::move(textureViews);
+        m_AccumulatedSamples = 0;
 
         if (!m_RayTracingDescriptorSet) {
             m_RayTracingDescriptorSet = m_RayTracingDescriptorAllocator.AllocateDescriptorSet(**m_RayTracingSetLayout);
@@ -205,7 +222,7 @@ namespace Renderer {
 
     void VulkanRenderer::WriteRayTracingDescriptorSet()
     {
-        if (!m_RayTracingScene || !m_RayTracingOutput) {
+        if (!m_RayTracingScene || !m_RayTracingOutput || !m_RayTracingAccumulation) {
             return;
         }
 
@@ -216,6 +233,7 @@ namespace Renderer {
             vk::DescriptorBufferInfo(*m_RayTracingScene->materials.buffer, 0, vk::WholeSize),
         };
         vk::DescriptorImageInfo imageInfo({}, *m_RayTracingOutput->imageView, vk::ImageLayout::eGeneral);
+        vk::DescriptorImageInfo accumulationInfo({}, *m_RayTracingAccumulation->imageView, vk::ImageLayout::eGeneral);
 
         // Every slot must hold a valid texture; unused ones repeat slot 0 (white)
         std::vector<vk::DescriptorImageInfo> textureInfos(RayTracing::MaxRayTracingTextures,
@@ -224,12 +242,13 @@ namespace Renderer {
             textureInfos[i].imageView = m_RayTracingTextureViews[i];
         }
 
-        std::array<vk::WriteDescriptorSet, 6> writes{};
+        std::array<vk::WriteDescriptorSet, 7> writes{};
         for (uint32_t i = 0; i < bufferInfos.size(); i++) {
             writes[i] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, i, 0, vk::DescriptorType::eStorageBuffer, nullptr, bufferInfos[i]);
         }
         writes[4] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 4, 0, vk::DescriptorType::eStorageImage, imageInfo);
         writes[5] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 5, 0, vk::DescriptorType::eCombinedImageSampler, textureInfos);
+        writes[6] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 6, 0, vk::DescriptorType::eStorageImage, accumulationInfo);
         m_Device->updateDescriptorSets(writes, nullptr);
     }
 
@@ -237,6 +256,16 @@ namespace Renderer {
     {
         auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
         const vk::ImageSubresourceRange colorRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+        // Keep averaging while the camera holds still; any change (moving,
+        // turning, resizing) makes the old samples wrong, so start over
+        glm::mat4 viewProjection = m_ProjectionMatrix * viewMatrix;
+        if (viewProjection != m_AccumulationViewProjection) {
+            m_AccumulationViewProjection = viewProjection;
+            m_AccumulatedSamples = 0;
+        }
+        bool restartAccumulation = m_AccumulatedSamples == 0;
+        m_AccumulatedSamples++;
 
         // The output image is shared by all frames in flight, so wait for the
         // previous frame's blit to finish reading it. Every pixel is rewritten,
@@ -251,13 +280,30 @@ namespace Renderer {
         toGeneral.image = *m_RayTracingOutput->image;
         toGeneral.subresourceRange = colorRange;
 
+        // The accumulation image is read and written by every frame, so each
+        // dispatch waits for the previous one's writes. On a restart the
+        // shader doesn't read it, so the old contents can be discarded.
+        vk::ImageMemoryBarrier2 accumulationBarrier{};
+        accumulationBarrier.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+        accumulationBarrier.srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite;
+        accumulationBarrier.dstStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+        accumulationBarrier.dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite;
+        accumulationBarrier.oldLayout = restartAccumulation ? vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral;
+        accumulationBarrier.newLayout = vk::ImageLayout::eGeneral;
+        accumulationBarrier.image = *m_RayTracingAccumulation->image;
+        accumulationBarrier.subresourceRange = colorRange;
+
+        std::array<vk::ImageMemoryBarrier2, 2> beforeDispatchBarriers{ toGeneral, accumulationBarrier };
         vk::DependencyInfo beforeDispatch{};
-        beforeDispatch.setImageMemoryBarriers(toGeneral);
+        beforeDispatch.setImageMemoryBarriers(beforeDispatchBarriers);
         commandBuffer.pipelineBarrier2(beforeDispatch);
 
+        glm::vec3 cameraPosition = glm::inverse(viewMatrix)[3];
         RayTracingPushConstants pushConstants{
-            .inverseView = glm::inverse(viewMatrix),
-            .inverseProjection = glm::inverse(m_ProjectionMatrix),
+            .inverseViewProjection = glm::inverse(viewProjection),
+            .cameraPosition = glm::vec4(cameraPosition, 1.0f),
+            .frameIndex = m_RayTracingFrameIndex++,
+            .sampleCount = m_AccumulatedSamples,
         };
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **m_RayTracingPipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **m_RayTracingPipelineLayout, 0, m_RayTracingDescriptorSet, nullptr);
