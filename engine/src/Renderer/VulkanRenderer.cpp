@@ -71,15 +71,20 @@ namespace
 
     vk::SurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& availableFormats)
     {
+        // Shaders output linear light; an sRGB format makes the hardware apply
+        // the display encoding on write. A UNORM fallback would show every
+        // frame too dark. Drivers offer either channel order (e.g. NVIDIA on
+        // X11 lists only B8G8R8A8), so accept both.
         for (const auto& availableFormat : availableFormats) 
         {
-            if (availableFormat.format == vk::Format::eR8G8B8A8Srgb && 
+            if ((availableFormat.format == vk::Format::eR8G8B8A8Srgb || availableFormat.format == vk::Format::eB8G8R8A8Srgb) &&
                 availableFormat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) 
             {
                 return availableFormat;
             }
         }
 
+        LOG_WARN("VulkanRenderer", "No sRGB swapchain format available; output will look too dark");
         return availableFormats[0];
     }
 
