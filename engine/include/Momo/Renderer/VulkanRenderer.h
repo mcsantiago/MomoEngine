@@ -65,6 +65,16 @@ struct TraversalCounts
     uint64_t values[TraversalCounterCount];
 };
 
+// Trace-only experiment: one capture queue (rays of one kind and bounce)
+// traced again by the small trace-only kernel
+struct TraceOnlyQueueResult
+{
+    bool shadow;     // Shadow (any-hit) rays; otherwise camera/bounce (closest-hit) rays
+    uint32_t bounce;
+    uint32_t rays;
+    double medianMs; // GPU time of tracing the queue once
+};
+
 // GPU copies of RayTracing::SceneGeometry, in device-local storage buffers
 struct RayTracingSceneBuffers
 {
@@ -101,6 +111,12 @@ public:
     void SetTraversalCounting(bool enabled) { m_CountTraversal = enabled; }
     // Totals since the last call; waits for the GPU to go idle
     TraversalCounts ReadAndResetTraversalCounters();
+    // While on, ray traced frames use the shader variant that records every ray
+    // it traces into capture queues (cleared when switched on). Uses ~0.8 GB.
+    void SetRayCapture(bool enabled);
+    // Traces the captured rays again with the trace-only kernel, each queue
+    // `repetitions` times, and returns the median times. Waits for the GPU.
+    std::vector<TraceOnlyQueueResult> RunTraceOnlyExperiment(uint32_t repetitions = 7);
     // Saves the latest ray traced frame (tonemapped) as a JPEG. Waits for the GPU to go idle.
     bool SaveRayTracingOutput(const std::filesystem::path& path);
 
@@ -224,6 +240,20 @@ private:
     std::optional<vk::raii::Pipeline> m_RayTracingCountingPipeline;
     std::optional<AllocatedBuffer> m_TraversalCounterBuffer; // (low, high) word pairs, host visible
     bool m_CountTraversal = false;
+
+    // Trace-only experiment (raytrace_traversal.slang, traceonly.slang)
+    static constexpr uint32_t CaptureBounceLimit = 6;
+    static constexpr uint32_t CaptureQueueCount = 2 * CaptureBounceLimit;
+    std::optional<vk::raii::Pipeline> m_RayTracingCapturePipeline;
+    std::optional<vk::raii::PipelineLayout> m_TraceOnlyPipelineLayout;
+    std::optional<vk::raii::Pipeline> m_TraceOnlyPipeline;
+    std::optional<AllocatedBuffer> m_CapturedRays;   // CaptureQueueCount queues of m_CaptureCapacity rays
+    std::optional<AllocatedBuffer> m_CaptureCounts;  // Host visible, one count per queue
+    std::optional<AllocatedBuffer> m_TraceHits;
+    uint32_t m_CaptureCapacity = 0;                  // Rays per queue: pixels per frame
+    bool m_CaptureRays = false;
+    void EnsureCaptureBuffers();
+    AllocatedBuffer CreateUninitializedBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags memoryProperties);
     bool m_PipelineStatisticsEnabled = false; // VK_KHR_pipeline_executable_properties enabled
     void LogPipelineStatistics(const vk::raii::Pipeline& pipeline, const std::string& name);
     DescriptorAllocator m_RayTracingDescriptorAllocator;

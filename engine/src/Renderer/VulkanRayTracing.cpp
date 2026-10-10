@@ -66,8 +66,10 @@ namespace Renderer {
         // Bindings 0-3: BVH nodes, triangle positions, triangle shading, materials.
         // 4: output image. 5: the scene's base color textures, as an array.
         // 6: accumulation image (running average across frames).
-        // 7: traversal counters (only read by the counting shader variant)
-        std::array<vk::DescriptorSetLayoutBinding, 8> bindings{};
+        // 7: traversal counters (only read by the counting shader variant).
+        // 8-10: captured rays, their counts per queue, and trace-only hits
+        // (only used by the trace-only experiment)
+        std::array<vk::DescriptorSetLayoutBinding, 11> bindings{};
         for (uint32_t i = 0; i < bindings.size(); i++) {
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
@@ -85,7 +87,7 @@ namespace Renderer {
         m_RayTracingDescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
             .maxSets = 1,
             .sizes = {
-                { vk::DescriptorType::eStorageBuffer, 5 },
+                { vk::DescriptorType::eStorageBuffer, 8 },
                 { vk::DescriptorType::eStorageImage, 2 },
                 { vk::DescriptorType::eCombinedImageSampler, RayTracing::MaxRayTracingTextures },
             },
@@ -95,20 +97,28 @@ namespace Renderer {
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo({}, **m_RayTracingSetLayout, pushConstantRange);
         m_RayTracingPipelineLayout = vk::raii::PipelineLayout(*m_Device, pipelineLayoutInfo);
 
-        auto createPipeline = [this](const std::string& shaderPath) {
+        auto createPipeline = [this](const std::string& shaderPath, vk::PipelineLayout layout) {
             auto shaderCode = ReadFile(shaderPath);
             vk::raii::ShaderModule shaderModule = CreateShaderModule(shaderCode);
             vk::ComputePipelineCreateInfo pipelineInfo(
                 m_PipelineStatisticsEnabled ? vk::PipelineCreateFlagBits::eCaptureStatisticsKHR : vk::PipelineCreateFlags{},
                 vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *shaderModule, "compMain"),
-                **m_RayTracingPipelineLayout
+                layout
             );
             return vk::raii::Pipeline(*m_Device, nullptr, pipelineInfo);
         };
-        m_RayTracingPipeline = createPipeline("shaders/raytrace.comp.spv");
-        // Same shader compiled with COUNT_TRAVERSAL, for benchmarks
-        m_RayTracingCountingPipeline = createPipeline("shaders/raytrace_counters.comp.spv");
+        m_RayTracingPipeline = createPipeline("shaders/raytrace.comp.spv", **m_RayTracingPipelineLayout);
+        // Same shader compiled with COUNT_TRAVERSAL / CAPTURE_RAYS, for benchmarks
+        m_RayTracingCountingPipeline = createPipeline("shaders/raytrace_counters.comp.spv", **m_RayTracingPipelineLayout);
+        m_RayTracingCapturePipeline = createPipeline("shaders/raytrace_capture.comp.spv", **m_RayTracingPipelineLayout);
+
+        // The trace-only kernel shares the descriptor set but has its own push constants
+        vk::PushConstantRange traceOnlyRange(vk::ShaderStageFlagBits::eCompute, 0, 4 * sizeof(uint32_t));
+        vk::PipelineLayoutCreateInfo traceOnlyLayoutInfo({}, **m_RayTracingSetLayout, traceOnlyRange);
+        m_TraceOnlyPipelineLayout = vk::raii::PipelineLayout(*m_Device, traceOnlyLayoutInfo);
+        m_TraceOnlyPipeline = createPipeline("shaders/traceonly.comp.spv", **m_TraceOnlyPipelineLayout);
         LogPipelineStatistics(*m_RayTracingPipeline, "raytrace");
+        LogPipelineStatistics(*m_TraceOnlyPipeline, "traceonly");
 
         std::array<uint32_t, 2 * TraversalCounterCount> zeros{};
         m_TraversalCounterBuffer.emplace(CreateBuffer(zeros.data(), sizeof(zeros), vk::BufferUsageFlagBits::eStorageBuffer, 0));
@@ -154,6 +164,11 @@ namespace Renderer {
     {
         m_RayTracingOutput.emplace(CreateRayTracingStorageImage(RayTracingOutputFormat, vk::ImageUsageFlagBits::eTransferSrc));
         m_RayTracingAccumulation.emplace(CreateRayTracingStorageImage(RayTracingAccumulationFormat, {}));
+        // Capture queues hold one ray per pixel; reallocated for the new size when next needed
+        m_CapturedRays.reset();
+        m_CaptureCounts.reset();
+        m_TraceHits.reset();
+        m_CaptureRays = false;
         // The old running average was for the old size
         m_AccumulatedSamples = 0;
     }
@@ -295,6 +310,105 @@ namespace Renderer {
         }
     }
 
+    AllocatedBuffer VulkanRenderer::CreateUninitializedBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags memoryProperties)
+    {
+        auto buffer = vk::raii::Buffer(*m_Device, vk::BufferCreateInfo({}, size, usage, vk::SharingMode::eExclusive));
+        vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
+        uint32_t memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, memoryProperties);
+        auto memory = vk::raii::DeviceMemory(*m_Device, vk::MemoryAllocateInfo(memRequirements.size, memoryTypeIndex));
+        buffer.bindMemory(*memory, 0);
+        return AllocatedBuffer{ std::move(memory), std::move(buffer), 0 };
+    }
+
+    void VulkanRenderer::EnsureCaptureBuffers()
+    {
+        if (m_CapturedRays) {
+            return;
+        }
+        m_CaptureCapacity = m_SwapchainExtent.width * m_SwapchainExtent.height;
+        constexpr vk::DeviceSize capturedRaySize = 2 * 4 * sizeof(float); // CapturedRay: two float4s
+        m_CapturedRays.emplace(CreateUninitializedBuffer(CaptureQueueCount * m_CaptureCapacity * capturedRaySize,
+            vk::BufferUsageFlagBits::eStorageBuffer, vk::MemoryPropertyFlagBits::eDeviceLocal));
+        m_CaptureCounts.emplace(CreateUninitializedBuffer(CaptureQueueCount * sizeof(uint32_t), vk::BufferUsageFlagBits::eStorageBuffer,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent));
+        m_TraceHits.emplace(CreateUninitializedBuffer(vk::DeviceSize(m_CaptureCapacity) * 2 * sizeof(float),
+            vk::BufferUsageFlagBits::eStorageBuffer, vk::MemoryPropertyFlagBits::eDeviceLocal));
+
+        std::array<vk::DescriptorBufferInfo, 3> infos{
+            vk::DescriptorBufferInfo(*m_CapturedRays->buffer, 0, vk::WholeSize),
+            vk::DescriptorBufferInfo(*m_CaptureCounts->buffer, 0, vk::WholeSize),
+            vk::DescriptorBufferInfo(*m_TraceHits->buffer, 0, vk::WholeSize),
+        };
+        std::array<vk::WriteDescriptorSet, 3> writes{};
+        for (uint32_t i = 0; i < infos.size(); i++) {
+            writes[i] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 8 + i, 0, vk::DescriptorType::eStorageBuffer, nullptr, infos[i]);
+        }
+        m_Device->updateDescriptorSets(writes, nullptr);
+        LOG_INFO("VulkanRenderer", "Allocated ray capture buffers: {} queues of {} rays", CaptureQueueCount, m_CaptureCapacity);
+    }
+
+    void VulkanRenderer::SetRayCapture(bool enabled)
+    {
+        if (enabled && !m_CaptureRays) {
+            // Frames in flight may still use the descriptor set or the buffers
+            m_Device->waitIdle();
+            EnsureCaptureBuffers();
+            void* counts = m_CaptureCounts->memory.mapMemory(0, CaptureQueueCount * sizeof(uint32_t));
+            std::memset(counts, 0, CaptureQueueCount * sizeof(uint32_t));
+            m_CaptureCounts->memory.unmapMemory();
+        }
+        m_CaptureRays = enabled;
+    }
+
+    std::vector<TraceOnlyQueueResult> VulkanRenderer::RunTraceOnlyExperiment(uint32_t repetitions)
+    {
+        std::vector<TraceOnlyQueueResult> results;
+        if (!m_CaptureCounts || !m_GpuTimingEnabled) {
+            return results;
+        }
+        m_Device->waitIdle();
+
+        std::array<uint32_t, CaptureQueueCount> counts;
+        const auto* mapped = static_cast<const uint32_t*>(m_CaptureCounts->memory.mapMemory(0, sizeof(counts)));
+        std::copy(mapped, mapped + CaptureQueueCount, counts.begin());
+        m_CaptureCounts->memory.unmapMemory();
+
+        vk::QueryPoolCreateInfo queryPoolInfo({}, vk::QueryType::eTimestamp, 2);
+        vk::raii::QueryPool queryPool(*m_Device, queryPoolInfo);
+
+        for (uint32_t queue = 0; queue < CaptureQueueCount; queue++) {
+            uint32_t rays = std::min(counts[queue], m_CaptureCapacity);
+            if (rays == 0) {
+                continue;
+            }
+            bool shadow = queue >= CaptureBounceLimit;
+            std::array<uint32_t, 4> pushConstants{ queue, shadow ? 1u : 0u, m_CaptureCapacity, 0 };
+
+            // One extra, discarded run first: the GPU may have clocked down while idle
+            std::vector<double> times;
+            for (uint32_t run = 0; run <= repetitions; run++) {
+                auto commandBuffer = BeginSingleUseCommandBuffer();
+                commandBuffer.resetQueryPool(*queryPool, 0, 2);
+                commandBuffer.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, *queryPool, 0);
+                commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **m_TraceOnlyPipeline);
+                commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **m_TraceOnlyPipelineLayout, 0, m_RayTracingDescriptorSet, nullptr);
+                commandBuffer.pushConstants<std::array<uint32_t, 4>>(**m_TraceOnlyPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, pushConstants);
+                commandBuffer.dispatch((rays + 63) / 64, 1, 1);
+                commandBuffer.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, *queryPool, 1);
+                EndSingleUseCommandBuffer(commandBuffer);
+
+                auto [result, ticks] = queryPool.getResults<uint64_t>(0, 2, 2 * sizeof(uint64_t), sizeof(uint64_t),
+                    vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
+                if (run > 0 && result == vk::Result::eSuccess) {
+                    times.push_back(((ticks[1] - ticks[0]) & m_TimestampValidBitmask) * m_TimestampPeriodNs / 1'000'000.0);
+                }
+            }
+            std::sort(times.begin(), times.end());
+            results.push_back({ shadow, queue % CaptureBounceLimit, rays, times.empty() ? 0.0 : times[times.size() / 2] });
+        }
+        return results;
+    }
+
     TraversalCounts VulkanRenderer::ReadAndResetTraversalCounters()
     {
         TraversalCounts counts{};
@@ -423,7 +537,9 @@ namespace Renderer {
             .sampleCount = m_AccumulatedSamples,
             .maxBounces = m_RayTracingMaxBounces,
         };
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_CountTraversal ? **m_RayTracingCountingPipeline : **m_RayTracingPipeline);
+        const vk::raii::Pipeline& pipeline = m_CaptureRays ? *m_RayTracingCapturePipeline
+                                           : m_CountTraversal ? *m_RayTracingCountingPipeline : *m_RayTracingPipeline;
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **m_RayTracingPipelineLayout, 0, m_RayTracingDescriptorSet, nullptr);
         commandBuffer.pushConstants<RayTracingPushConstants>(**m_RayTracingPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, pushConstants);
         // Time the dispatch alone, for benchmarks. Each timestamp is written once
@@ -436,6 +552,15 @@ namespace Renderer {
         commandBuffer.dispatch((m_SwapchainExtent.width + 7) / 8, (m_SwapchainExtent.height + 7) / 8, 1);
         if (m_GpuTimingEnabled) {
             commandBuffer.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, **m_TimestampQueryPool, firstQuery + 3);
+        }
+        if (m_CaptureRays) {
+            // Make the captured rays and counts visible to the trace-only kernel and the host
+            vk::MemoryBarrier2 captured(vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderStorageWrite,
+                                        vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eHost,
+                                        vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eHostRead);
+            vk::DependencyInfo captureDependency{};
+            captureDependency.setMemoryBarriers(captured);
+            commandBuffer.pipelineBarrier2(captureDependency);
         }
         if (m_CountTraversal) {
             // Make the counters' atomic adds visible to ReadAndResetTraversalCounters

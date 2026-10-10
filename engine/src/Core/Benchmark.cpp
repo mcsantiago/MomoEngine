@@ -59,8 +59,14 @@ std::optional<size_t> Benchmark::Record(const Renderer::DrawFrameTime& drawTime,
 
     if (m_CountingFramesLeft > 0)
     {
-        if (--m_CountingFramesLeft > 0)
-            return std::nullopt;
+        // After the last counting frame, one capture frame
+        if (--m_CountingFramesLeft == 0)
+            m_Capturing = true;
+        return std::nullopt;
+    }
+    if (m_Capturing)
+    {
+        m_Capturing = false;
         LOG_INFO("Benchmark", "View '{}' done", m_Views[m_ViewIndex].Name);
         m_FramesInView = 0;
         return m_ViewIndex++;
@@ -119,6 +125,37 @@ bool Benchmark::WriteResults(const BenchmarkEnvironment& environment) const
                 c[ClosestRays] / pixels, c[ShadowRays] / pixels, c[Steps] / rays, c[NodeReads] / rays,
                 c[NodeReads] * double(environment.NodeBytes) / rays, c[BoxTests] / rays, c[TriangleTests] / rays, c[AlphaTests] / rays);
         }
+        std::string traceOnly;
+        if (!m_Samples[i].traceOnly.empty())
+        {
+            // The same rays the path tracer traced in one frame, traced again by
+            // the trace-only kernel; compared with the path tracer's own rate
+            uint64_t closestRays = 0, shadowRays = 0;
+            double closestMs = 0.0, shadowMs = 0.0;
+            std::string queues;
+            for (const Renderer::TraceOnlyQueueResult& queue : m_Samples[i].traceOnly)
+            {
+                (queue.shadow ? shadowRays : closestRays) += queue.rays;
+                (queue.shadow ? shadowMs : closestMs) += queue.medianMs;
+                queues += std::format(R"({}{{ "kind": "{}", "bounce": {}, "rays": {}, "ms": {:.3f} }})",
+                    queues.empty() ? "" : ", ", queue.shadow ? "shadow" : "closest", queue.bounce, queue.rays, queue.medianMs);
+            }
+            auto mraysPerSecond = [](double rays, double ms) { return ms > 0.0 ? rays / ms / 1000.0 : 0.0; };
+            std::string megakernel = "null";
+            if (const auto& counts = m_Samples[i].traversal; counts && !m_Samples[i].dispatchMs.empty())
+            {
+                std::vector<float> sorted = m_Samples[i].dispatchMs;
+                std::sort(sorted.begin(), sorted.end());
+                double raysPerFrame = double(counts->values[Renderer::ClosestRays] + counts->values[Renderer::ShadowRays])
+                                    / std::max(m_Spec.CountingFrames, 1u);
+                megakernel = std::format("{:.1f}", mraysPerSecond(raysPerFrame, sorted[sorted.size() / 2]));
+            }
+            traceOnly = std::format(R"(,
+      "trace_only": {{ "closest_rays": {}, "shadow_rays": {}, "closest_ms": {:.2f}, "shadow_ms": {:.2f}, "mrays_per_s": {:.1f}, "closest_mrays_per_s": {:.1f}, "shadow_mrays_per_s": {:.1f}, "megakernel_mrays_per_s": {},
+        "queues": [{}] }})",
+                closestRays, shadowRays, closestMs, shadowMs, mraysPerSecond(double(closestRays + shadowRays), closestMs + shadowMs),
+                mraysPerSecond(double(closestRays), closestMs), mraysPerSecond(double(shadowRays), shadowMs), megakernel, queues);
+        }
         std::string screenshot = m_Samples[i].screenshotSaved
             ? std::format(R"(,
       "screenshot": {})", JsonString(ScreenshotPath(i).filename().string()))
@@ -129,10 +166,10 @@ bool Benchmark::WriteResults(const BenchmarkEnvironment& environment) const
       "cpu_total_ms": {},
       "record_ms": {},
       "submit_ms": {},
-      "fence_wait_ms": {}{}{} }})",
+      "fence_wait_ms": {}{}{}{} }})",
             i > 0 ? ",\n" : "", JsonString(view.Name), view.Position.x, view.Position.y, view.Position.z, view.Yaw, view.Pitch,
             StatsJson(m_Samples[i].dispatchMs), StatsJson(m_Samples[i].frameMs), StatsJson(m_Samples[i].cpuTotalMs),
-            StatsJson(m_Samples[i].recordMs), StatsJson(m_Samples[i].submitMs), StatsJson(m_Samples[i].fenceWaitMs), traversal, screenshot);
+            StatsJson(m_Samples[i].recordMs), StatsJson(m_Samples[i].submitMs), StatsJson(m_Samples[i].fenceWaitMs), traversal, traceOnly, screenshot);
     }
 
     std::string json = std::format(R"({{

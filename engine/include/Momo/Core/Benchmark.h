@@ -58,6 +58,9 @@ public:
     bool IsFinished() const { return m_ViewIndex >= m_Views.size(); }
     // True while the current view renders its counting frames
     bool IsCounting() const { return !IsFinished() && m_CountingFramesLeft > 0; }
+    // True for the frame that records rays for the trace-only experiment,
+    // rendered after the counting frames
+    bool IsCapturing() const { return !IsFinished() && m_Capturing; }
 
     // Call once per ray traced frame, after rendering it. Returns the index of
     // the view this frame finished, if any; its image is converged by then,
@@ -68,6 +71,7 @@ public:
     void SetScreenshotSaved(size_t viewIndex) { m_Samples[viewIndex].screenshotSaved = true; }
     // pixels: pixels per frame (the counts cover CountingFrames frames)
     void SetTraversalCounts(size_t viewIndex, const Renderer::TraversalCounts& counts, uint64_t pixels);
+    void SetTraceOnlyResults(size_t viewIndex, std::vector<Renderer::TraceOnlyQueueResult> results) { m_Samples[viewIndex].traceOnly = std::move(results); }
     bool WriteResults(const BenchmarkEnvironment& environment) const;
 
 private:
@@ -84,6 +88,7 @@ private:
         bool screenshotSaved = false;
         std::optional<Renderer::TraversalCounts> traversal;
         uint64_t pixels = 0;
+        std::vector<Renderer::TraceOnlyQueueResult> traceOnly;
     };
 
     BenchmarkSpecification m_Spec;
@@ -92,6 +97,7 @@ private:
     size_t m_ViewIndex = 0;
     uint32_t m_FramesInView = 0;
     uint32_t m_CountingFramesLeft = 0;
+    bool m_Capturing = false;
 };
 
 } // namespace Momo

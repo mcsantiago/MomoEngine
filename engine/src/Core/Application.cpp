@@ -164,6 +164,7 @@ namespace Momo
             {
                 m_Camera->SetPose(m_Benchmark->CurrentView().Position, m_Benchmark->CurrentView().Yaw, m_Benchmark->CurrentView().Pitch);
                 m_Renderer.SetTraversalCounting(m_Benchmark->IsCounting());
+                m_Renderer.SetRayCapture(m_Benchmark->IsCapturing());
             }
             updateTimer.End();
 
@@ -187,6 +188,8 @@ namespace Momo
                     m_Benchmark->SetTraversalCounts(*finishedView, m_Renderer.ReadAndResetTraversalCounters(),
                                                     uint64_t(extent.width) * extent.height);
                     m_Renderer.SetTraversalCounting(false);
+                    m_Benchmark->SetTraceOnlyResults(*finishedView, m_Renderer.RunTraceOnlyExperiment());
+                    m_Renderer.SetRayCapture(false);
                     if (m_Renderer.SaveRayTracingOutput(m_Benchmark->ScreenshotPath(*finishedView)))
                         m_Benchmark->SetScreenshotSaved(*finishedView);
                 }

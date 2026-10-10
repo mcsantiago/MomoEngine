@@ -138,6 +138,13 @@ set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 # Ensure output directory exists
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 
+if (MOMO_SHADER_DEBUG_INFO)
+  set(SHADER_DEBUG_ARGS -g)
+  message(STATUS "Compiling shaders with debug info")
+else()
+  set(SHADER_DEBUG_ARGS "")
+endif()
+
 # Define shader compilation function
 function(compile_slang_shader SHADER_SOURCE)
   get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME_WE)
@@ -154,6 +161,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -profile spirv_1_5
       -emit-spirv-directly
       -matrix-layout-column-major
+      ${SHADER_DEBUG_ARGS}
       -stage vertex
       -entry vertMain
       -fvk-use-entrypoint-name
@@ -172,6 +180,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -profile spirv_1_5
       -emit-spirv-directly
       -matrix-layout-column-major
+      ${SHADER_DEBUG_ARGS}
       -stage fragment
       -entry fragMain
       -fvk-use-entrypoint-name
@@ -209,13 +218,14 @@ function(compile_slang_compute_shader SHADER_SOURCE)
       -profile spirv_1_5
       -emit-spirv-directly
       -matrix-layout-column-major
+      ${SHADER_DEBUG_ARGS}
       -stage compute
       -entry compMain
       -fvk-use-entrypoint-name
       ${DEFINE_ARG}
       -o ${COMP_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE}
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/raytrace_traversal.slang
     COMMENT "Compiling compute shader: ${OUTPUT_NAME}"
     VERBATIM
   )
@@ -228,6 +238,8 @@ set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang counters COUNT_TRAVERSAL)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang capture CAPTURE_RAYS)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/traceonly.slang)
 
 # Create custom target for all shaders
 add_custom_target(MomoShaders ALL
