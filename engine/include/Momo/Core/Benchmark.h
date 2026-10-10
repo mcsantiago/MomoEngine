@@ -39,10 +39,10 @@ struct BenchmarkEnvironment
     uint32_t Height;
     uint32_t Bounces;
     // The ray tracing scene: optimizations that reshape the BVH should show up here too
-    RayTracing::BvhStats Bvh;
+    RayTracing::WideBvhStats Bvh;
     size_t Triangles;
     size_t GpuBytes;
-    size_t NodeBytes; // sizeof(RayTracing::BvhNode), to turn node reads into bytes
+    size_t NodeBytes; // Size of one BVH node, to turn node reads into bytes
 };
 
 // Renders a fixed list of camera views in ray traced mode, records the GPU

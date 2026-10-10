@@ -116,7 +116,7 @@ void AppendMesh(const Assets::Mesh& mesh, uint32_t materialIndex, bool alphaMask
 }
 } // namespace
 
-SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Scene& scene, const BvhBuildSettings& settings)
+SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Scene& scene)
 {
     std::vector<TrianglePositions> positions;
     std::vector<TriangleShading> shading;
@@ -134,7 +134,7 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
     }
 
     SceneGeometry geometry;
-    geometry.bvh = BuildBvh(positions, settings);
+    geometry.bvh = BuildWideBvh(positions);
     geometry.positions = Reorder<TrianglePositions>(positions, geometry.bvh.triangleOrder);
     geometry.shading = Reorder<TriangleShading>(shading, geometry.bvh.triangleOrder);
     geometry.materials = materials.TakeMaterials();

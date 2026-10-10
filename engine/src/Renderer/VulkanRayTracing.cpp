@@ -226,7 +226,7 @@ namespace Renderer {
         auto upload = [this](const auto& items) {
             return CreateDeviceLocalBuffer(items.data(), sizeof(items[0]) * items.size(), vk::BufferUsageFlagBits::eStorageBuffer);
         };
-        size_t totalBytes = sizeof(RayTracing::BvhNode) * geometry.bvh.nodes.size()
+        size_t totalBytes = sizeof(RayTracing::CompressedWideNode) * geometry.bvh.nodes.size()
                           + sizeof(RayTracing::TrianglePositions) * geometry.positions.size()
                           + sizeof(RayTracing::TriangleShading) * geometry.shading.size()
                           + sizeof(RayTracing::RayTracingMaterial) * geometry.materials.size();

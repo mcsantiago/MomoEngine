@@ -5,6 +5,7 @@
 #include "Momo/Assets/AssetRegistry.h"
 #include "Momo/Core/Scene.h"
 #include "Momo/RayTracing/Bvh.h"
+#include "Momo/RayTracing/WideBvh.h"
 
 namespace Momo::RayTracing {
 
@@ -24,10 +25,10 @@ static_assert(sizeof(RayTracingMaterial) == 32, "RayTracingMaterial must match t
 
 // Everything the ray tracing compute shader reads about the scene's geometry,
 // already in the layout it is uploaded in: one world-space triangle list for
-// the whole scene (single-level BVH) with both triangle arrays in BVH order.
+// the whole scene (single-level compressed wide BVH) with both triangle arrays in BVH order.
 // Built on the CPU, then handed to the renderer, which uploads it and drops it.
 struct SceneGeometry {
-    Bvh bvh;
+    WideBvh bvh;
     std::vector<TrianglePositions> positions;
     std::vector<TriangleShading> shading;
     std::vector<RayTracingMaterial> materials;
@@ -39,7 +40,6 @@ struct SceneGeometry {
 // Flattens every mesh of every model in the scene into world space (the mesh's
 // localTransform; models have no transform of their own yet) and builds the
 // BVH over the result. Meshes without a material get a default white one.
-SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Scene& scene,
-                                 const BvhBuildSettings& settings = {});
+SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Scene& scene);
 
 } // namespace Momo::RayTracing

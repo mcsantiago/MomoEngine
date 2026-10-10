@@ -53,7 +53,7 @@ enum TraversalCounter : uint32_t
     ClosestRays,   // Camera and bounce rays (closest hit)
     ShadowRays,    // Any-hit rays toward the sun
     Steps,         // Traversal loop iterations
-    NodeReads,     // BvhNode entries read
+    NodeReads,     // BVH nodes read
     BoxTests,
     TriangleTests,
     AlphaTests,
@@ -82,7 +82,7 @@ struct RayTracingSceneBuffers
     AllocatedBuffer positions;
     AllocatedBuffer shading;
     AllocatedBuffer materials;
-    RayTracing::BvhStats stats;
+    RayTracing::WideBvhStats stats;
     size_t triangleCount;
     size_t gpuBytes; // All four buffers
 };

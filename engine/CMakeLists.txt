@@ -32,6 +32,8 @@ add_library(MomoEngine STATIC
   src/RayTracing/Bvh.cpp
   include/Momo/RayTracing/SceneGeometry.h
   src/RayTracing/SceneGeometry.cpp
+  include/Momo/RayTracing/WideBvh.h
+  src/RayTracing/WideBvh.cpp
 )
 
 # Public headers are under engine/include

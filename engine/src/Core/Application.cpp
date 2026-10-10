@@ -79,10 +79,10 @@ namespace Momo
                 bvhTimer.Start();
                 RayTracing::SceneGeometry geometry = RayTracing::BuildSceneGeometry(registry, scene);
                 bvhTimer.End();
-                const RayTracing::BvhStats& bvhStats = geometry.bvh.stats;
-                LOG_INFO("Momo", "Built BVH over {} triangles in {:.1f} ms: {} nodes, {} leaves, depth {}, max leaf {} triangles, SAH cost {:.1f}",
-                         geometry.positions.size(), bvhTimer.GetElapsedTimeInMs(), bvhStats.nodeCount, bvhStats.leafCount,
-                         bvhStats.maxDepth, bvhStats.maxLeafTriangles, bvhStats.sahCost);
+                const RayTracing::WideBvhStats& bvhStats = geometry.bvh.stats;
+                LOG_INFO("Momo", "Built BVH over {} triangles in {:.1f} ms: {} wide nodes, depth {} (binary tree: {} nodes, {} leaves, depth {}, SAH cost {:.1f})",
+                         geometry.positions.size(), bvhTimer.GetElapsedTimeInMs(), bvhStats.nodeCount, bvhStats.maxDepth,
+                         bvhStats.binary.nodeCount, bvhStats.binary.leafCount, bvhStats.binary.maxDepth, bvhStats.binary.sahCost);
                 return geometry;
             });
     }
@@ -205,7 +205,7 @@ namespace Momo
                         .Bvh = scene.stats,
                         .Triangles = scene.triangleCount,
                         .GpuBytes = scene.gpuBytes,
-                        .NodeBytes = sizeof(RayTracing::BvhNode),
+                        .NodeBytes = sizeof(RayTracing::CompressedWideNode),
                     });
                     m_Running = false;
                 }

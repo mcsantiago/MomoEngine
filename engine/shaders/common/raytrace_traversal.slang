@@ -5,12 +5,14 @@
 // alpha test for masked materials, which the CPU reference (no textures) skips.
 
 // Layouts match engine/include/Momo/RayTracing/{Bvh,SceneGeometry}.h (std430)
-struct BvhNode {
-    float3 boundsMin;
-    uint   leftOrFirst;   // Interior: left child (right = left + 1). Leaf: first triangle
-    float3 boundsMax;
-    uint   triangleCount; // 0 for interior nodes
-};
+// Compressed 8-wide BVH node (CompressedWideNode in WideBvh.h, Ylitie et al.
+// 2017): 80 bytes, read as five uint4 rows so each is one 16-byte load.
+//   row 0: origin.xyz (float bits), w = exponent x | y << 8 | z << 16 | internalMask << 24
+//   row 1: childBase, triangleBase, meta[0..3], meta[4..7]
+//   row 2: lowX[0..3], lowX[4..7], lowY[0..3], lowY[4..7]
+//   row 3: lowZ[0..3], lowZ[4..7], highX[0..3], highX[4..7]
+//   row 4: highY[0..3], highY[4..7], highZ[0..3], highZ[4..7]
+static const uint WideNodeRows = 5;
 
 struct TrianglePositions {
     float4 v0;    // w: 1 if the triangle's material is alpha masked
@@ -36,7 +38,7 @@ struct Material {
     uint2  padding;
 };
 
-[vk::binding(0, 0)] StructuredBuffer<BvhNode> nodes;
+[vk::binding(0, 0)] StructuredBuffer<uint4> nodes; // WideNodeRows rows per node
 [vk::binding(1, 0)] StructuredBuffer<TrianglePositions> triangles;
 [vk::binding(2, 0)] StructuredBuffer<TriangleShading> shading;
 [vk::binding(3, 0)] StructuredBuffer<Material> materials;
@@ -54,7 +56,7 @@ static const uint MaxTextures = 256;
 static const uint CounterClosestRays = 0;
 static const uint CounterShadowRays = 1;
 static const uint CounterSteps = 2;          // Traversal loop iterations
-static const uint CounterNodeReads = 3;      // BvhNode entries read from memory
+static const uint CounterNodeReads = 3;      // BVH nodes read from memory
 static const uint CounterBoxTests = 4;
 static const uint CounterTriangleTests = 5;
 static const uint CounterAlphaTests = 6;
@@ -81,9 +83,9 @@ static const uint CaptureQueueCount = 2 * CaptureBounceLimit; // Closest-hit que
 #endif
 
 static const float Infinity = asfloat(0x7f800000);
-// Near-first traversal pushes at most one node per level, so the BVH build's
-// maxDepth (32 by default) bounds this
-static const uint StackSize = 64;
+// Traversal pushes at most one entry per level, and the builder keeps the
+// wide tree shallower than this (WideTraversalStackSize in WideBvh.cpp)
+static const uint StackSize = 32;
 
 struct Ray {
     float3 origin;
@@ -135,10 +137,10 @@ bool IntersectTriangle(Ray ray, TrianglePositions triangle, float tMin, float tM
 // direction component gives an infinite inverse, and 0 * inf = NaN when the
 // origin lies on that slab's plane; NaN counts as unbounded so rays running
 // along a box face still hit it.
-float IntersectAabb(Ray ray, float3 inverseDirection, BvhNode node, float tMin, float tMax)
+float IntersectAabb(Ray ray, float3 inverseDirection, float3 boundsMin, float3 boundsMax, float tMin, float tMax)
 {
-    float3 t0 = (node.boundsMin - ray.origin) * inverseDirection;
-    float3 t1 = (node.boundsMax - ray.origin) * inverseDirection;
+    float3 t0 = (boundsMin - ray.origin) * inverseDirection;
+    float3 t1 = (boundsMax - ray.origin) * inverseDirection;
     float3 tNear = min(select(isnan(t0), -Infinity, t0), select(isnan(t1), -Infinity, t1));
     float3 tFar = max(select(isnan(t0), Infinity, t0), select(isnan(t1), Infinity, t1));
     float tEnter = max(max(tNear.x, tNear.y), max(tNear.z, tMin));
@@ -169,74 +171,127 @@ bool PassesAlphaTest(uint triangleIndex, Hit hit)
     return SampleBaseColor(material, InterpolateUV(triangle, hit)).a >= material.alphaCutoff;
 }
 
+// Byte `index` (0-7) of the 8 bytes stored in two uints
+uint ByteOf(uint low4, uint high4, uint index)
+{
+    return ((index < 4 ? low4 : high4) >> ((index & 3) * 8)) & 0xFF;
+}
+
+// Tests the triangles of the leaf in `slot` of a node (meta, base from row 1),
+// shortening tMax to each closer hit. With anyHit, stops at the first.
+bool IntersectWideLeaf(Ray ray, uint4 row1, uint slot, float tMin, inout float tMax, bool anyHit, inout Hit closest)
+{
+    uint meta = ByteOf(row1.z, row1.w, slot);
+    uint first = row1.y + (meta & 31);
+    uint count = countbits(meta >> 5); // Unary-coded triangle count
+    bool found = false;
+    for (uint i = first; i < first + count; i++)
+    {
+        COUNT(CounterTriangleTests, 1);
+        Hit hit;
+        TrianglePositions triangle = triangles[i];
+        // Only masked triangles pay for the texture lookup
+        if (IntersectTriangle(ray, triangle, tMin, tMax, hit) &&
+            (triangle.v0.w == 0.0 || PassesAlphaTest(i, hit)))
+        {
+            closest = hit;
+            closest.triangle = i;
+            tMax = hit.t;
+            found = true;
+            if (anyHit)
+                return true;
+        }
+    }
+    return found;
+}
+
 // Finds the closest hit in (tMin, tMax). With anyHit, returns at the first
 // hit found instead, which is all a shadow ray needs to know.
+//
+// Mirrors IntersectWideBvh in WideBvh.cpp. Visiting a node tests all its
+// children's boxes at once into an 8-bit hit mask, ordered so the lowest bit
+// is (roughly) the nearest child: bit k is slot k ^ octant, and the builder
+// puts in slot s the child that rays of octant s reach first. Leaves are
+// tested in place; descending into an interior child pushes the rest of the
+// mask as one stack entry, so the stack holds at most one entry per level.
 bool IntersectScene(Ray ray, float tMin, float tMax, bool anyHit, out Hit closest)
 {
     closest = {};
     bool found = false;
     float3 inverseDirection = 1.0 / ray.direction;
+    uint octant = (ray.direction.x < 0.0 ? 1u : 0u) | (ray.direction.y < 0.0 ? 2u : 0u) | (ray.direction.z < 0.0 ? 4u : 0u);
     COUNT(anyHit ? CounterShadowRays : CounterClosestRays, 1);
-    COUNT(CounterNodeReads, 1);
-    COUNT(CounterBoxTests, 1);
-    if (IntersectAabb(ray, inverseDirection, nodes[0], tMin, tMax) == Infinity)
-        return false;
 
+    // Entries: node index << 8 | its children still to visit (mask bits)
     uint stack[StackSize];
     uint stackSize = 0;
     uint nodeIndex = 0;
 
     while (true)
     {
-        BvhNode node = nodes[nodeIndex];
+        // Visit a node: decode and test all eight child boxes
+        uint4 row0 = nodes[nodeIndex * WideNodeRows + 0];
+        uint4 row1 = nodes[nodeIndex * WideNodeRows + 1];
+        uint4 row2 = nodes[nodeIndex * WideNodeRows + 2];
+        uint4 row3 = nodes[nodeIndex * WideNodeRows + 3];
+        uint4 row4 = nodes[nodeIndex * WideNodeRows + 4];
         COUNT(CounterSteps, 1);
         COUNT(CounterNodeReads, 1);
-        if (node.triangleCount > 0)
+
+        float3 origin = asfloat(row0.xyz);
+        // Quantization step per axis: a float with the stored exponent bits
+        float3 step = float3(asfloat((row0.w & 0xFF) << 23), asfloat(((row0.w >> 8) & 0xFF) << 23), asfloat(((row0.w >> 16) & 0xFF) << 23));
+        uint hits = 0;
+        for (uint k = 0; k < 8; k++)
         {
-            for (uint i = node.leftOrFirst; i < node.leftOrFirst + node.triangleCount; i++)
+            uint slot = k ^ octant;
+            if (ByteOf(row1.z, row1.w, slot) == 0)
+                continue;
+            float3 low = origin + float3(ByteOf(row2.x, row2.y, slot), ByteOf(row2.z, row2.w, slot), ByteOf(row3.x, row3.y, slot)) * step;
+            float3 high = origin + float3(ByteOf(row3.z, row3.w, slot), ByteOf(row4.x, row4.y, slot), ByteOf(row4.z, row4.w, slot)) * step;
+            COUNT(CounterBoxTests, 1);
+            if (IntersectAabb(ray, inverseDirection, low, high, tMin, tMax) != Infinity)
+                hits |= 1u << k;
+        }
+
+        // Work through groups, testing leaves in place, until an interior
+        // child to descend into turns up (or nothing is left)
+        uint groupNode = nodeIndex;
+        uint internalMask = row0.w >> 24;
+        bool descend = false;
+        while (true)
+        {
+            while (hits != 0)
             {
-                COUNT(CounterTriangleTests, 1);
-                Hit hit;
-                TrianglePositions triangle = triangles[i];
-                // Only masked triangles pay for the texture lookup
-                if (IntersectTriangle(ray, triangle, tMin, tMax, hit) &&
-                    (triangle.v0.w == 0.0 || PassesAlphaTest(i, hit)))
+                uint k = firstbitlow(hits);
+                hits &= hits - 1;
+                uint slot = k ^ octant;
+                if ((internalMask >> slot) & 1)
                 {
-                    closest = hit;
-                    closest.triangle = i;
-                    tMax = hit.t;
+                    if (hits != 0 && stackSize < StackSize)
+                        stack[stackSize++] = (groupNode << 8) | hits;
+                    nodeIndex = row1.x + countbits(internalMask & ((1u << slot) - 1));
+                    descend = true;
+                    break;
+                }
+                if (IntersectWideLeaf(ray, row1, slot, tMin, tMax, anyHit, closest))
+                {
                     found = true;
                     if (anyHit)
                         return true;
                 }
             }
+            if (descend || stackSize == 0)
+                break;
+            // Resume a pushed group: its node's header and child references
+            stackSize--;
+            groupNode = stack[stackSize] >> 8;
+            hits = stack[stackSize] & 0xFF;
+            row0 = nodes[groupNode * WideNodeRows + 0];
+            row1 = nodes[groupNode * WideNodeRows + 1];
+            internalMask = row0.w >> 24;
         }
-        else
-        {
-            uint nearChild = node.leftOrFirst;
-            uint farChild = node.leftOrFirst + 1;
-            COUNT(CounterNodeReads, 2);
-            COUNT(CounterBoxTests, 2);
-            float nearDistance = IntersectAabb(ray, inverseDirection, nodes[nearChild], tMin, tMax);
-            float farDistance = IntersectAabb(ray, inverseDirection, nodes[farChild], tMin, tMax);
-            if (farDistance < nearDistance)
-            {
-                uint swapChild = nearChild; nearChild = farChild; farChild = swapChild;
-                float swapDistance = nearDistance; nearDistance = farDistance; farDistance = swapDistance;
-            }
-
-            if (nearDistance != Infinity)
-            {
-                if (farDistance != Infinity && stackSize < StackSize)
-                    stack[stackSize++] = farChild;
-                nodeIndex = nearChild;
-                continue;
-            }
-        }
-
-        if (stackSize == 0)
-            break;
-        nodeIndex = stack[--stackSize];
+        if (!descend)
+            return found;
     }
-    return found;
 }

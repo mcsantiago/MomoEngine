@@ -179,15 +179,16 @@ bool Benchmark::WriteResults(const BenchmarkEnvironment& environment) const
   "bounces": {},
   "warmup_frames": {},
   "frames_per_view": {},
-  "bvh": {{ "triangles": {}, "nodes": {}, "leaves": {}, "max_depth": {}, "max_leaf_triangles": {}, "sah_cost": {:.2f}, "build_ms": {:.1f}, "gpu_mb": {:.1f} }},
+  "bvh": {{ "layout": "compressed 8-wide", "triangles": {}, "nodes": {}, "max_depth": {}, "binary_nodes": {}, "leaves": {}, "binary_max_depth": {}, "max_leaf_triangles": {}, "sah_cost": {:.2f}, "build_ms": {:.1f}, "gpu_mb": {:.1f} }},
   "views": [
 {}
   ]
 }}
 )", today, JsonString(environment.Gpu), environment.Width, environment.Height, environment.Bounces,
         m_Spec.WarmupFrames, m_Spec.MeasuredFrames,
-        environment.Triangles, environment.Bvh.nodeCount, environment.Bvh.leafCount, environment.Bvh.maxDepth,
-        environment.Bvh.maxLeafTriangles, environment.Bvh.sahCost, environment.Bvh.buildMs, environment.GpuBytes / (1024.0 * 1024.0),
+        environment.Triangles, environment.Bvh.nodeCount, environment.Bvh.maxDepth, environment.Bvh.binary.nodeCount,
+        environment.Bvh.binary.leafCount, environment.Bvh.binary.maxDepth, environment.Bvh.binary.maxLeafTriangles,
+        environment.Bvh.binary.sahCost, environment.Bvh.buildMs, environment.GpuBytes / (1024.0 * 1024.0),
         views);
 
     std::ofstream file(m_Spec.OutputPath);
