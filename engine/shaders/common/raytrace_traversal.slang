@@ -171,6 +171,21 @@ bool PassesAlphaTest(uint triangleIndex, Hit hit)
     return SampleBaseColor(material, InterpolateUV(triangle, hit)).a >= material.alphaCutoff;
 }
 
+// Slab test for a child box in a node's quantized grid: plane t = q *
+// gridScale + gridOffset (IntersectGridBox in WideBvh.cpp). No NaN handling
+// needed: GridInverseDirection keeps infinities out, and stored boxes
+// strictly enclose their contents, so nudged directions lose no hits.
+float IntersectGridBox(float3 qLow, float3 qHigh, float3 gridScale, float3 gridOffset, float tMin, float tMax)
+{
+    float3 t0 = mad(qLow, gridScale, gridOffset);
+    float3 t1 = mad(qHigh, gridScale, gridOffset);
+    float3 tNear = min(t0, t1);
+    float3 tFar = max(t0, t1);
+    float tEnter = max(max(tNear.x, tNear.y), max(tNear.z, tMin));
+    float tExit = min(min(tFar.x, tFar.y), min(tFar.z, tMax));
+    return tEnter <= tExit ? tEnter : Infinity;
+}
+
 // Byte `index` (0-7) of the 8 bytes stored in two uints
 uint ByteOf(uint low4, uint high4, uint index)
 {
@@ -214,11 +229,20 @@ bool IntersectWideLeaf(Ray ray, uint4 row1, uint slot, float tMin, inout float t
 // puts in slot s the child that rays of octant s reach first. Leaves are
 // tested in place; descending into an interior child pushes the rest of the
 // mask as one stack entry, so the stack holds at most one entry per level.
+// 1 / direction with exactly-zero components nudged to a tiny value (see
+// IntersectGridBox; GridInverseDirection in WideBvh.cpp)
+float3 GridInverseDirection(float3 direction)
+{
+    static const float Epsilon = 1e-20;
+    float3 safe = select(abs(direction) < Epsilon, select(direction < 0.0, -Epsilon, Epsilon), direction);
+    return 1.0 / safe;
+}
+
 bool IntersectScene(Ray ray, float tMin, float tMax, bool anyHit, out Hit closest)
 {
     closest = {};
     bool found = false;
-    float3 inverseDirection = 1.0 / ray.direction;
+    float3 inverseDirection = GridInverseDirection(ray.direction);
     uint octant = (ray.direction.x < 0.0 ? 1u : 0u) | (ray.direction.y < 0.0 ? 2u : 0u) | (ray.direction.z < 0.0 ? 4u : 0u);
     COUNT(anyHit ? CounterShadowRays : CounterClosestRays, 1);
 
@@ -238,20 +262,35 @@ bool IntersectScene(Ray ray, float tMin, float tMax, bool anyHit, out Hit closes
         COUNT(CounterSteps, 1);
         COUNT(CounterNodeReads, 1);
 
+        // Transform the ray into the node's quantized grid once: a box plane
+        // at grid position q is then at t = q * gridScale + gridOffset, one
+        // fused multiply-add (Ylitie et al. 2017)
         float3 origin = asfloat(row0.xyz);
         // Quantization step per axis: a float with the stored exponent bits
         float3 step = float3(asfloat((row0.w & 0xFF) << 23), asfloat(((row0.w >> 8) & 0xFF) << 23), asfloat(((row0.w >> 16) & 0xFF) << 23));
+        float3 gridScale = step * inverseDirection;
+        float3 gridOffset = (origin - ray.origin) * inverseDirection;
+
+        // Slots are tested in stored order, so every byte is at a constant
+        // position; only the hit bit goes to the visiting position k = slot ^ octant
         uint hits = 0;
-        for (uint k = 0; k < 8; k++)
+        [unroll]
+        for (uint slot = 0; slot < 8; slot++)
         {
-            uint slot = k ^ octant;
-            if (ByteOf(row1.z, row1.w, slot) == 0)
+            uint shift = (slot & 3) * 8;
+            uint word = slot < 4 ? 0 : 1;
+            uint meta = ((word == 0 ? row1.z : row1.w) >> shift) & 0xFF;
+            if (meta == 0)
                 continue;
-            float3 low = origin + float3(ByteOf(row2.x, row2.y, slot), ByteOf(row2.z, row2.w, slot), ByteOf(row3.x, row3.y, slot)) * step;
-            float3 high = origin + float3(ByteOf(row3.z, row3.w, slot), ByteOf(row4.x, row4.y, slot), ByteOf(row4.z, row4.w, slot)) * step;
+            float3 qLow = float3(((word == 0 ? row2.x : row2.y) >> shift) & 0xFF,
+                                 ((word == 0 ? row2.z : row2.w) >> shift) & 0xFF,
+                                 ((word == 0 ? row3.x : row3.y) >> shift) & 0xFF);
+            float3 qHigh = float3(((word == 0 ? row3.z : row3.w) >> shift) & 0xFF,
+                                  ((word == 0 ? row4.x : row4.y) >> shift) & 0xFF,
+                                  ((word == 0 ? row4.z : row4.w) >> shift) & 0xFF);
             COUNT(CounterBoxTests, 1);
-            if (IntersectAabb(ray, inverseDirection, low, high, tMin, tMax) != Infinity)
-                hits |= 1u << k;
+            if (IntersectGridBox(qLow, qHigh, gridScale, gridOffset, tMin, tMax) != Infinity)
+                hits |= 1u << (slot ^ octant);
         }
 
         // Work through groups, testing leaves in place, until an interior

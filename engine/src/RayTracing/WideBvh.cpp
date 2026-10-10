@@ -22,20 +22,33 @@ float SurfaceArea(const BvhNode& node)
     return 2.0f * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x);
 }
 
-// The slab test of Bvh.cpp, on an explicit box: NaN (a zero direction
-// component with the origin on a slab plane) counts as unbounded
-float IntersectBox(const Ray& ray, const glm::vec3& inverseDirection, const glm::vec3& boundsMin, const glm::vec3& boundsMax, float tMin, float tMax)
+// 1 / direction with exactly-zero components nudged to a tiny value, so the
+// box test never sees infinities and NaNs never appear. Nudging would wrongly
+// miss a box when a ray parallel to an axis runs exactly along one of its
+// faces; the builder rules that out by making every stored box strictly
+// enclose its contents (see QuantizeAxis), so results stay exact.
+glm::vec3 GridInverseDirection(const glm::vec3& direction)
+{
+    constexpr float Epsilon = 1e-20f;
+    glm::vec3 safe;
+    for (int i = 0; i < 3; i++)
+        safe[i] = std::abs(direction[i]) < Epsilon ? std::copysign(Epsilon, direction[i]) : direction[i];
+    return 1.0f / safe;
+}
+
+// Slab test for a child box in a node's quantized grid. The ray is
+// transformed into the grid once per node, so each plane is one
+// multiply-add: t = q * gridScale + gridOffset. Mirrored by the shader.
+float IntersectGridBox(const glm::vec3& qLow, const glm::vec3& qHigh, const glm::vec3& gridScale, const glm::vec3& gridOffset, float tMin, float tMax)
 {
     float tEnter = tMin;
     float tExit = tMax;
     for (int axis = 0; axis < 3; axis++)
     {
-        float t0 = (boundsMin[axis] - ray.origin[axis]) * inverseDirection[axis];
-        float t1 = (boundsMax[axis] - ray.origin[axis]) * inverseDirection[axis];
-        float tNear = std::min(std::isnan(t0) ? -Infinity : t0, std::isnan(t1) ? -Infinity : t1);
-        float tFar = std::max(std::isnan(t0) ? Infinity : t0, std::isnan(t1) ? Infinity : t1);
-        tEnter = std::max(tEnter, tNear);
-        tExit = std::min(tExit, tFar);
+        float t0 = std::fma(qLow[axis], gridScale[axis], gridOffset[axis]);
+        float t1 = std::fma(qHigh[axis], gridScale[axis], gridOffset[axis]);
+        tEnter = std::max(tEnter, std::min(t0, t1));
+        tExit = std::min(tExit, std::max(t0, t1));
     }
     return tEnter <= tExit ? tEnter : Infinity;
 }
@@ -160,17 +173,23 @@ private:
     }
 
     // Picks the smallest power-of-two step that spans the node in 255 steps
-    // and quantizes every child's bounds outwards on that axis. Retries with
-    // a coarser step if float rounding would leave a box short.
+    // and quantizes every child's bounds outwards on that axis, strictly: no
+    // stored face touches the contents, which lets traversal nudge zero ray
+    // direction components without losing hits (see GridInverseDirection).
+    // The node's origin sits one step below the lowest child for the same
+    // reason. Retries with a coarser step if a box doesn't fit.
     static void QuantizeAxis(CompressedWideNode& node, int axis, const std::array<int, 8>& slotChild,
-                             const std::vector<glm::vec3>& mins, const std::vector<glm::vec3>& maxs, float origin, float extent)
+                             const std::vector<glm::vec3>& mins, const std::vector<glm::vec3>& maxs, float lowest, float extent)
     {
-        int exponent = extent > 0.0f ? int(std::ceil(std::log2(extent / 255.0f))) : -126;
+        // Room for the extent plus a step of padding on each side
+        int exponent = extent > 0.0f ? int(std::ceil(std::log2(extent / 252.0f))) : -126;
         for (;; exponent++)
         {
             exponent = std::clamp(exponent, -126, 127);
             uint8_t biased = uint8_t(exponent + 127);
             float step = StepFromExponent(biased);
+            float origin = lowest - step;
+            node.origin[axis] = origin;
             bool fits = true;
             for (int s = 0; s < 8 && fits; s++)
             {
@@ -179,11 +198,11 @@ private:
                 float low = mins[slotChild[s]][axis], high = maxs[slotChild[s]][axis];
                 float qLow = std::clamp(std::floor((low - origin) / step), 0.0f, 255.0f);
                 float qHigh = std::clamp(std::ceil((high - origin) / step), 0.0f, 255.0f);
-                while (qLow > 0.0f && Dequantize(origin, uint8_t(qLow), step) > low)
+                while (qLow > 0.0f && Dequantize(origin, uint8_t(qLow), step) >= low)
                     qLow -= 1.0f;
-                while (qHigh < 255.0f && Dequantize(origin, uint8_t(qHigh), step) < high)
+                while (qHigh < 255.0f && Dequantize(origin, uint8_t(qHigh), step) <= high)
                     qHigh += 1.0f;
-                if (Dequantize(origin, uint8_t(qLow), step) > low || Dequantize(origin, uint8_t(qHigh), step) < high)
+                if (Dequantize(origin, uint8_t(qLow), step) >= low || Dequantize(origin, uint8_t(qHigh), step) <= high)
                 {
                     fits = false;
                     break;
@@ -220,7 +239,6 @@ private:
         }
 
         CompressedWideNode node{};
-        node.origin = origin;
         for (int axis = 0; axis < 3; axis++)
             QuantizeAxis(node, axis, slotChild, mins, maxs, origin[axis], top[axis] - origin[axis]);
 
@@ -304,7 +322,7 @@ std::optional<Hit> IntersectWideBvh(const Ray& ray, const WideBvh& bvh, std::spa
     if (bvh.nodes.empty())
         return std::nullopt;
 
-    glm::vec3 inverseDirection = 1.0f / ray.direction;
+    glm::vec3 inverseDirection = GridInverseDirection(ray.direction);
     uint32_t octant = RayOctant(ray.direction);
     std::optional<Hit> closest;
 
@@ -322,15 +340,17 @@ std::optional<Hit> IntersectWideBvh(const Ray& ray, const WideBvh& bvh, std::spa
         // Visit a node: test all its children's boxes at once
         const CompressedWideNode& node = bvh.nodes[nodeIndex];
         Group group{ nodeIndex, 0 };
-        for (uint32_t k = 0; k < 8; k++)
+        glm::vec3 step(StepFromExponent(node.exponent[0]), StepFromExponent(node.exponent[1]), StepFromExponent(node.exponent[2]));
+        glm::vec3 gridScale = step * inverseDirection;
+        glm::vec3 gridOffset = (node.origin - ray.origin) * inverseDirection;
+        for (uint32_t slot = 0; slot < 8; slot++)
         {
-            uint32_t slot = k ^ octant;
             if (node.meta[slot] == 0)
                 continue;
-            glm::vec3 boundsMin, boundsMax;
-            DecodeChildBounds(node, slot, boundsMin, boundsMax);
-            if (IntersectBox(ray, inverseDirection, boundsMin, boundsMax, tMin, tMax) != Infinity)
-                group.hits |= 1u << k;
+            glm::vec3 qLow(node.lowX[slot], node.lowY[slot], node.lowZ[slot]);
+            glm::vec3 qHigh(node.highX[slot], node.highY[slot], node.highZ[slot]);
+            if (IntersectGridBox(qLow, qHigh, gridScale, gridOffset, tMin, tMax) != Infinity)
+                group.hits |= 1u << (slot ^ octant);
         }
 
         // Work through groups, testing leaves in place, until an interior child
