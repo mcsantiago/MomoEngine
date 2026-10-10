@@ -186,10 +186,21 @@ function(compile_slang_shader SHADER_SOURCE)
   set(COMPILED_SHADERS ${COMPILED_SHADERS} ${VERT_OUTPUT} ${FRAG_OUTPUT} PARENT_SCOPE)
 endfunction()
 
-# Compute shaders have a single stage, entry point compMain
+# Compute shaders have a single stage, entry point compMain. An optional
+# variant name compiles a second copy with -D<DEFINE>, written as
+# <name>_<variant>.comp.spv (e.g. raytrace_counters.comp.spv).
 function(compile_slang_compute_shader SHADER_SOURCE)
   get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME_WE)
-  set(COMP_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.comp.spv)
+  set(VARIANT ${ARGV1})
+  set(DEFINE ${ARGV2})
+  if(VARIANT)
+    set(COMP_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}_${VARIANT}.comp.spv)
+    set(DEFINE_ARG -D${DEFINE})
+  else()
+    set(COMP_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.comp.spv)
+    set(DEFINE_ARG "")
+  endif()
+  get_filename_component(OUTPUT_NAME ${COMP_OUTPUT} NAME)
 
   add_custom_command(
     OUTPUT ${COMP_OUTPUT}
@@ -201,10 +212,11 @@ function(compile_slang_compute_shader SHADER_SOURCE)
       -stage compute
       -entry compMain
       -fvk-use-entrypoint-name
+      ${DEFINE_ARG}
       -o ${COMP_OUTPUT}
       ${SHADER_SOURCE}
     DEPENDS ${SHADER_SOURCE}
-    COMMENT "Compiling compute shader: ${SHADER_NAME}.comp.spv"
+    COMMENT "Compiling compute shader: ${OUTPUT_NAME}"
     VERBATIM
   )
 
@@ -215,6 +227,7 @@ endfunction()
 set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang counters COUNT_TRAVERSAL)
 
 # Create custom target for all shaders
 add_custom_target(MomoShaders ALL

@@ -47,6 +47,24 @@ struct RayTracingPushConstants
 };
 static_assert(sizeof(RayTracingPushConstants) == 96, "RayTracingPushConstants must match raytrace.slang");
 
+// Totals from the ray tracing shader's counting variant (raytrace.slang, COUNT_TRAVERSAL)
+enum TraversalCounter : uint32_t
+{
+    ClosestRays,   // Camera and bounce rays (closest hit)
+    ShadowRays,    // Any-hit rays toward the sun
+    Steps,         // Traversal loop iterations
+    NodeReads,     // BvhNode entries read
+    BoxTests,
+    TriangleTests,
+    AlphaTests,
+    TraversalCounterCount
+};
+
+struct TraversalCounts
+{
+    uint64_t values[TraversalCounterCount];
+};
+
 // GPU copies of RayTracing::SceneGeometry, in device-local storage buffers
 struct RayTracingSceneBuffers
 {
@@ -78,6 +96,11 @@ public:
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
     uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
     const RayTracingSceneBuffers* GetRayTracingScene() const { return m_RayTracingScene ? &*m_RayTracingScene : nullptr; }
+    // While on, ray traced frames use the shader variant that counts its
+    // traversal work. Slower, so benchmarks only switch it on after timing.
+    void SetTraversalCounting(bool enabled) { m_CountTraversal = enabled; }
+    // Totals since the last call; waits for the GPU to go idle
+    TraversalCounts ReadAndResetTraversalCounters();
     // Saves the latest ray traced frame (tonemapped) as a JPEG. Waits for the GPU to go idle.
     bool SaveRayTracingOutput(const std::filesystem::path& path);
 
@@ -198,6 +221,9 @@ private:
     std::optional<vk::raii::DescriptorSetLayout> m_RayTracingSetLayout;
     std::optional<vk::raii::PipelineLayout> m_RayTracingPipelineLayout;
     std::optional<vk::raii::Pipeline> m_RayTracingPipeline;
+    std::optional<vk::raii::Pipeline> m_RayTracingCountingPipeline;
+    std::optional<AllocatedBuffer> m_TraversalCounterBuffer; // (low, high) word pairs, host visible
+    bool m_CountTraversal = false;
     DescriptorAllocator m_RayTracingDescriptorAllocator;
     vk::DescriptorSet m_RayTracingDescriptorSet; // Allocated on first upload
     std::vector<vk::ImageView> m_RayTracingTextureViews; // Owned by the caller's texture cache

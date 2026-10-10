@@ -18,6 +18,9 @@ struct BenchmarkSpecification
     // MAX_FRAMES_IN_FLIGHT frames late) and lets clocks settle after a view change.
     uint32_t WarmupFrames = 60;
     uint32_t MeasuredFrames = 240;
+    // After the timed frames, frames rendered with the shader variant that
+    // counts traversal work (slower, so never timed)
+    uint32_t CountingFrames = 4;
 };
 
 struct BenchmarkView
@@ -39,6 +42,7 @@ struct BenchmarkEnvironment
     RayTracing::BvhStats Bvh;
     size_t Triangles;
     size_t GpuBytes;
+    size_t NodeBytes; // sizeof(RayTracing::BvhNode), to turn node reads into bytes
 };
 
 // Renders a fixed list of camera views in ray traced mode, records the GPU
@@ -52,13 +56,18 @@ public:
     // The view to render this frame; only valid while !IsFinished()
     const BenchmarkView& CurrentView() const { return m_Views[m_ViewIndex]; }
     bool IsFinished() const { return m_ViewIndex >= m_Views.size(); }
+    // True while the current view renders its counting frames
+    bool IsCounting() const { return !IsFinished() && m_CountingFramesLeft > 0; }
 
     // Call once per ray traced frame, after rendering it. Returns the index of
-    // the view this frame finished, if any; its image is converged by then.
+    // the view this frame finished, if any; its image is converged by then,
+    // and the renderer's traversal counters hold its counting frames.
     std::optional<size_t> Record(const Renderer::DrawFrameTime& drawTime, const Profiling::FrameTime& frameTime);
     // Where to save the screenshot of a view: next to the results file
     std::filesystem::path ScreenshotPath(size_t viewIndex) const;
     void SetScreenshotSaved(size_t viewIndex) { m_Samples[viewIndex].screenshotSaved = true; }
+    // pixels: pixels per frame (the counts cover CountingFrames frames)
+    void SetTraversalCounts(size_t viewIndex, const Renderer::TraversalCounts& counts, uint64_t pixels);
     bool WriteResults(const BenchmarkEnvironment& environment) const;
 
 private:
@@ -73,6 +82,8 @@ private:
         std::vector<float> submitMs; // Includes presentKHR, which can block on the display
         std::vector<float> fenceWaitMs;
         bool screenshotSaved = false;
+        std::optional<Renderer::TraversalCounts> traversal;
+        uint64_t pixels = 0;
     };
 
     BenchmarkSpecification m_Spec;
@@ -80,6 +91,7 @@ private:
     std::vector<ViewSamples> m_Samples;
     size_t m_ViewIndex = 0;
     uint32_t m_FramesInView = 0;
+    uint32_t m_CountingFramesLeft = 0;
 };
 
 } // namespace Momo

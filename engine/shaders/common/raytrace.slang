@@ -48,6 +48,27 @@ static const uint MaxTextures = 256;
 // Running average of every sample since the camera last moved
 [vk::binding(6, 0)] [format("rgba32f")] RWTexture2D<float4> accumulationImage;
 
+// Traversal counters, only in the variant compiled with COUNT_TRAVERSAL (see
+// engine/CMakeLists.txt), which benchmarks run separately from their timed
+// frames so counting can't skew the timings. Each thread tallies in its own
+// variables and adds them to the buffer once, as 64-bit counts (a frame can
+// exceed 2^32 node reads). Must match VulkanRenderer::TraversalCounter.
+#ifdef COUNT_TRAVERSAL
+[vk::binding(7, 0)] RWStructuredBuffer<uint> traversalCounters; // (low, high) pairs
+static const uint CounterClosestRays = 0;
+static const uint CounterShadowRays = 1;
+static const uint CounterSteps = 2;          // Traversal loop iterations
+static const uint CounterNodeReads = 3;      // BvhNode entries read from memory
+static const uint CounterBoxTests = 4;
+static const uint CounterTriangleTests = 5;
+static const uint CounterAlphaTests = 6;
+static const uint CounterCount = 7;
+static uint threadCounts[CounterCount];
+#define COUNT(counter, amount) threadCounts[counter] += (amount)
+#else
+#define COUNT(counter, amount)
+#endif
+
 // Matches RayTracingPushConstants in VulkanRenderer.h
 struct PushConstants {
     float4x4 inverseViewProjection; // NDC -> world
@@ -150,6 +171,7 @@ float4 SampleBaseColor(Material material, float2 uv)
 // transparent part of a masked triangle (e.g. around a leaf) doesn't count
 bool PassesAlphaTest(uint triangleIndex, Hit hit)
 {
+    COUNT(CounterAlphaTests, 1);
     TriangleShading triangle = shading[triangleIndex];
     Material material = materials[triangle.materialIndex];
     return SampleBaseColor(material, InterpolateUV(triangle, hit)).a >= material.alphaCutoff;
@@ -162,6 +184,9 @@ bool IntersectScene(Ray ray, float tMin, float tMax, bool anyHit, out Hit closes
     closest = {};
     bool found = false;
     float3 inverseDirection = 1.0 / ray.direction;
+    COUNT(anyHit ? CounterShadowRays : CounterClosestRays, 1);
+    COUNT(CounterNodeReads, 1);
+    COUNT(CounterBoxTests, 1);
     if (IntersectAabb(ray, inverseDirection, nodes[0], tMin, tMax) == Infinity)
         return false;
 
@@ -172,10 +197,13 @@ bool IntersectScene(Ray ray, float tMin, float tMax, bool anyHit, out Hit closes
     while (true)
     {
         BvhNode node = nodes[nodeIndex];
+        COUNT(CounterSteps, 1);
+        COUNT(CounterNodeReads, 1);
         if (node.triangleCount > 0)
         {
             for (uint i = node.leftOrFirst; i < node.leftOrFirst + node.triangleCount; i++)
             {
+                COUNT(CounterTriangleTests, 1);
                 Hit hit;
                 TrianglePositions triangle = triangles[i];
                 // Only masked triangles pay for the texture lookup
@@ -195,6 +223,8 @@ bool IntersectScene(Ray ray, float tMin, float tMax, bool anyHit, out Hit closes
         {
             uint nearChild = node.leftOrFirst;
             uint farChild = node.leftOrFirst + 1;
+            COUNT(CounterNodeReads, 2);
+            COUNT(CounterBoxTests, 2);
             float nearDistance = IntersectAabb(ray, inverseDirection, nodes[nearChild], tMin, tMax);
             float farDistance = IntersectAabb(ray, inverseDirection, nodes[farChild], tMin, tMax);
             if (farDistance < nearDistance)
@@ -381,6 +411,11 @@ void compMain(uint3 threadId : SV_DispatchThreadID)
         return;
 
     // A different random sequence for every pixel and every frame
+#ifdef COUNT_TRAVERSAL
+    for (uint counter = 0; counter < CounterCount; counter++)
+        threadCounts[counter] = 0;
+#endif
+
     uint rngState = PcgHash(threadId.x + PcgHash(threadId.y + PcgHash(pc.frameIndex)));
 
     // A random point inside the pixel rather than its center: averaged over
@@ -408,4 +443,15 @@ void compMain(uint3 threadId : SV_DispatchThreadID)
     }
     accumulationImage[threadId.xy] = float4(average, 1.0);
     outputImage[threadId.xy] = float4(Tonemap(average), 1.0);
+
+#ifdef COUNT_TRAVERSAL
+    // 64-bit add: carry into the high word when the low word wraps
+    for (uint counter = 0; counter < CounterCount; counter++)
+    {
+        uint previous;
+        InterlockedAdd(traversalCounters[counter * 2], threadCounts[counter], previous);
+        if (previous + threadCounts[counter] < previous)
+            InterlockedAdd(traversalCounters[counter * 2 + 1], 1u);
+    }
+#endif
 }

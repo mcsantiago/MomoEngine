@@ -161,7 +161,10 @@ namespace Momo
             if (!m_Benchmark)
                 m_Camera->OnUpdate(dt, m_InputState);
             else if (!m_Benchmark->IsFinished())
+            {
                 m_Camera->SetPose(m_Benchmark->CurrentView().Position, m_Benchmark->CurrentView().Yaw, m_Benchmark->CurrentView().Pitch);
+                m_Renderer.SetTraversalCounting(m_Benchmark->IsCounting());
+            }
             updateTimer.End();
 
             auto drawFrameTime = Draw(dt);
@@ -180,6 +183,10 @@ namespace Momo
             {
                 if (std::optional<size_t> finishedView = m_Benchmark->Record(*drawFrameTime, frameStats))
                 {
+                    vk::Extent2D extent = m_Renderer.GetSwapchainExtent();
+                    m_Benchmark->SetTraversalCounts(*finishedView, m_Renderer.ReadAndResetTraversalCounters(),
+                                                    uint64_t(extent.width) * extent.height);
+                    m_Renderer.SetTraversalCounting(false);
                     if (m_Renderer.SaveRayTracingOutput(m_Benchmark->ScreenshotPath(*finishedView)))
                         m_Benchmark->SetScreenshotSaved(*finishedView);
                 }
@@ -195,6 +202,7 @@ namespace Momo
                         .Bvh = scene.stats,
                         .Triangles = scene.triangleCount,
                         .GpuBytes = scene.gpuBytes,
+                        .NodeBytes = sizeof(RayTracing::BvhNode),
                     });
                     m_Running = false;
                 }

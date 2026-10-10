@@ -5,6 +5,7 @@
 #include "Momo/Logging/Logger.h"
 #include <glm/gtc/matrix_inverse.hpp>
 #include <algorithm>
+#include <cstring>
 #include <cmath>
 #include <glm/gtc/packing.hpp>
 #include <stb_image_write.h>
@@ -64,8 +65,9 @@ namespace Renderer {
     {
         // Bindings 0-3: BVH nodes, triangle positions, triangle shading, materials.
         // 4: output image. 5: the scene's base color textures, as an array.
-        // 6: accumulation image (running average across frames)
-        std::array<vk::DescriptorSetLayoutBinding, 7> bindings{};
+        // 6: accumulation image (running average across frames).
+        // 7: traversal counters (only read by the counting shader variant)
+        std::array<vk::DescriptorSetLayoutBinding, 8> bindings{};
         for (uint32_t i = 0; i < bindings.size(); i++) {
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
@@ -83,7 +85,7 @@ namespace Renderer {
         m_RayTracingDescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
             .maxSets = 1,
             .sizes = {
-                { vk::DescriptorType::eStorageBuffer, 4 },
+                { vk::DescriptorType::eStorageBuffer, 5 },
                 { vk::DescriptorType::eStorageImage, 2 },
                 { vk::DescriptorType::eCombinedImageSampler, RayTracing::MaxRayTracingTextures },
             },
@@ -93,14 +95,22 @@ namespace Renderer {
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo({}, **m_RayTracingSetLayout, pushConstantRange);
         m_RayTracingPipelineLayout = vk::raii::PipelineLayout(*m_Device, pipelineLayoutInfo);
 
-        auto shaderCode = ReadFile("shaders/raytrace.comp.spv");
-        vk::raii::ShaderModule shaderModule = CreateShaderModule(shaderCode);
-        vk::ComputePipelineCreateInfo pipelineInfo(
-            {},
-            vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *shaderModule, "compMain"),
-            **m_RayTracingPipelineLayout
-        );
-        m_RayTracingPipeline = vk::raii::Pipeline(*m_Device, nullptr, pipelineInfo);
+        auto createPipeline = [this](const std::string& shaderPath) {
+            auto shaderCode = ReadFile(shaderPath);
+            vk::raii::ShaderModule shaderModule = CreateShaderModule(shaderCode);
+            vk::ComputePipelineCreateInfo pipelineInfo(
+                {},
+                vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *shaderModule, "compMain"),
+                **m_RayTracingPipelineLayout
+            );
+            return vk::raii::Pipeline(*m_Device, nullptr, pipelineInfo);
+        };
+        m_RayTracingPipeline = createPipeline("shaders/raytrace.comp.spv");
+        // Same shader compiled with COUNT_TRAVERSAL, for benchmarks
+        m_RayTracingCountingPipeline = createPipeline("shaders/raytrace_counters.comp.spv");
+
+        std::array<uint32_t, 2 * TraversalCounterCount> zeros{};
+        m_TraversalCounterBuffer.emplace(CreateBuffer(zeros.data(), sizeof(zeros), vk::BufferUsageFlagBits::eStorageBuffer, 0));
         LOG_INFO("VulkanRenderer", "Ray tracing pipeline created successfully");
     }
 
@@ -247,14 +257,36 @@ namespace Renderer {
             textureInfos[i].imageView = m_RayTracingTextureViews[i];
         }
 
-        std::array<vk::WriteDescriptorSet, 7> writes{};
+        vk::DescriptorBufferInfo counterInfo(*m_TraversalCounterBuffer->buffer, 0, vk::WholeSize);
+
+        std::array<vk::WriteDescriptorSet, 8> writes{};
         for (uint32_t i = 0; i < bufferInfos.size(); i++) {
             writes[i] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, i, 0, vk::DescriptorType::eStorageBuffer, nullptr, bufferInfos[i]);
         }
         writes[4] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 4, 0, vk::DescriptorType::eStorageImage, imageInfo);
         writes[5] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 5, 0, vk::DescriptorType::eCombinedImageSampler, textureInfos);
         writes[6] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 6, 0, vk::DescriptorType::eStorageImage, accumulationInfo);
+        writes[7] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 7, 0, vk::DescriptorType::eStorageBuffer, nullptr, counterInfo);
         m_Device->updateDescriptorSets(writes, nullptr);
+    }
+
+    TraversalCounts VulkanRenderer::ReadAndResetTraversalCounters()
+    {
+        TraversalCounts counts{};
+        if (!m_TraversalCounterBuffer) {
+            return counts;
+        }
+        // Every frame that counted has to finish first
+        m_Device->waitIdle();
+
+        constexpr vk::DeviceSize size = 2 * TraversalCounterCount * sizeof(uint32_t);
+        auto* words = static_cast<uint32_t*>(m_TraversalCounterBuffer->memory.mapMemory(0, size));
+        for (uint32_t i = 0; i < TraversalCounterCount; i++) {
+            counts.values[i] = (uint64_t(words[2 * i + 1]) << 32) | words[2 * i];
+        }
+        std::memset(words, 0, size);
+        m_TraversalCounterBuffer->memory.unmapMemory();
+        return counts;
     }
 
     bool VulkanRenderer::SaveRayTracingOutput(const std::filesystem::path& path)
@@ -366,7 +398,7 @@ namespace Renderer {
             .sampleCount = m_AccumulatedSamples,
             .maxBounces = m_RayTracingMaxBounces,
         };
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **m_RayTracingPipeline);
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_CountTraversal ? **m_RayTracingCountingPipeline : **m_RayTracingPipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **m_RayTracingPipelineLayout, 0, m_RayTracingDescriptorSet, nullptr);
         commandBuffer.pushConstants<RayTracingPushConstants>(**m_RayTracingPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, pushConstants);
         // Time the dispatch alone, for benchmarks. Each timestamp is written once
@@ -379,6 +411,14 @@ namespace Renderer {
         commandBuffer.dispatch((m_SwapchainExtent.width + 7) / 8, (m_SwapchainExtent.height + 7) / 8, 1);
         if (m_GpuTimingEnabled) {
             commandBuffer.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, **m_TimestampQueryPool, firstQuery + 3);
+        }
+        if (m_CountTraversal) {
+            // Make the counters' atomic adds visible to ReadAndResetTraversalCounters
+            vk::MemoryBarrier2 toHost(vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderStorageWrite,
+                                      vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
+            vk::DependencyInfo counterDependency{};
+            counterDependency.setMemoryBarriers(toHost);
+            commandBuffer.pipelineBarrier2(counterDependency);
         }
 
         // Output: shader writes -> blit reads
