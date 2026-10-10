@@ -62,6 +62,7 @@ struct BvhStats {
     uint32_t maxDepth = 0;
     uint32_t maxLeafTriangles = 0;
     float    sahCost = 0.0f; // Expected cost of a random ray, relative to the root's surface area
+    double   buildMs = 0.0;  // Wall-clock time of BuildBvh
 };
 
 struct Bvh {

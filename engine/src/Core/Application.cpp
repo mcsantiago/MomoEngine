@@ -166,27 +166,6 @@ namespace Momo
 
             auto drawFrameTime = Draw(dt);
 
-            // Frames before the ray tracing geometry is uploaded render raster and don't count
-            if (m_Benchmark && drawFrameTime.has_value() && m_Renderer.IsRayTracingAvailable())
-            {
-                if (std::optional<size_t> finishedView = m_Benchmark->Record(*drawFrameTime))
-                {
-                    if (m_Renderer.SaveRayTracingOutput(m_Benchmark->ScreenshotPath(*finishedView)))
-                        m_Benchmark->SetScreenshotSaved(*finishedView);
-                }
-                if (m_Benchmark->IsFinished())
-                {
-                    vk::Extent2D extent = m_Renderer.GetSwapchainExtent();
-                    m_Benchmark->WriteResults({
-                        .Gpu = m_Renderer.GetDeviceName(),
-                        .Width = extent.width,
-                        .Height = extent.height,
-                        .Bounces = m_Renderer.GetRayTracingMaxBounces(),
-                    });
-                    m_Running = false;
-                }
-            }
-
             frameStats.frame        = m_FrameCount;
             frameStats.cpuTotalMs   = std::chrono::duration<float, std::milli>(clock::now() - now).count();
             frameStats.updateMs     = updateTimer.GetElapsedTimeInMs();
@@ -195,6 +174,31 @@ namespace Momo
             frameStats.fenceWaitMs  = drawFrameTime.has_value() ? drawFrameTime->fenceWaitMs : 0.0f;
             frameStats.gpuMs        = drawFrameTime.has_value() ? drawFrameTime->gpuFrameMs : 0.0f;
             statsAccumulator.Add(frameStats);
+
+            // Frames before the ray tracing geometry is uploaded render raster and don't count
+            if (m_Benchmark && drawFrameTime.has_value() && m_Renderer.IsRayTracingAvailable())
+            {
+                if (std::optional<size_t> finishedView = m_Benchmark->Record(*drawFrameTime, frameStats))
+                {
+                    if (m_Renderer.SaveRayTracingOutput(m_Benchmark->ScreenshotPath(*finishedView)))
+                        m_Benchmark->SetScreenshotSaved(*finishedView);
+                }
+                if (m_Benchmark->IsFinished())
+                {
+                    vk::Extent2D extent = m_Renderer.GetSwapchainExtent();
+                    const Renderer::RayTracingSceneBuffers& scene = *m_Renderer.GetRayTracingScene();
+                    m_Benchmark->WriteResults({
+                        .Gpu = m_Renderer.GetDeviceName(),
+                        .Width = extent.width,
+                        .Height = extent.height,
+                        .Bounces = m_Renderer.GetRayTracingMaxBounces(),
+                        .Bvh = scene.stats,
+                        .Triangles = scene.triangleCount,
+                        .GpuBytes = scene.gpuBytes,
+                    });
+                    m_Running = false;
+                }
+            }
 
             // Log a summary roughly once per second instead of every frame
             double statsWindowSeconds = std::chrono::duration<double>(clock::now() - statsWindowStart).count();

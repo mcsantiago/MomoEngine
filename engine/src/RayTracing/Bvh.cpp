@@ -1,6 +1,7 @@
 #include "Momo/RayTracing/Bvh.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cassert>
 #include <cmath>
 #include <limits>
@@ -270,7 +271,10 @@ float IntersectAabb(const Ray& ray, const glm::vec3& inverseDirection, const Bvh
 Bvh BuildBvh(std::span<const TrianglePositions> triangles, const BvhBuildSettings& settings)
 {
     assert(settings.binCount >= 2);
-    return BvhBuilder(triangles, settings).Build();
+    auto start = std::chrono::steady_clock::now();
+    Bvh bvh = BvhBuilder(triangles, settings).Build();
+    bvh.stats.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return bvh;
 }
 
 // Möller-Trumbore. Conditions are written as !(in range) so NaNs from

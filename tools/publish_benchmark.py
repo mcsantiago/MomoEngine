@@ -55,8 +55,16 @@ def main():
         "bounces": results["bounces"],
         "warmup_frames": results["warmup_frames"],
         "frames_per_view": results["frames_per_view"],
+        "bvh": results["bvh"],
         "views": [
-            {"name": view["name"], "dispatch_ms": view["dispatch_ms"], "frame_ms": view["frame_ms"]}
+            {
+                "name": view["name"],
+                "dispatch_ms": view["dispatch_ms"],
+                "frame_ms": view["frame_ms"],
+                # GPU-bound, so frame rate follows from the GPU frame time
+                "fps": round(1000.0 / view["frame_ms"]["median"], 1),
+                "cpu": {key: view[key + "_ms"] for key in ("cpu_total", "record", "submit", "fence_wait")},
+            }
             for view in results["views"]
         ],
     }

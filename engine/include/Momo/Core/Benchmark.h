@@ -7,6 +7,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 #include "Momo/Renderer/VulkanRenderer.h"
+#include "Momo/Profiling/FrameStats.h"
 
 namespace Momo {
 
@@ -34,6 +35,10 @@ struct BenchmarkEnvironment
     uint32_t Width;
     uint32_t Height;
     uint32_t Bounces;
+    // The ray tracing scene: optimizations that reshape the BVH should show up here too
+    RayTracing::BvhStats Bvh;
+    size_t Triangles;
+    size_t GpuBytes;
 };
 
 // Renders a fixed list of camera views in ray traced mode, records the GPU
@@ -50,7 +55,7 @@ public:
 
     // Call once per ray traced frame, after rendering it. Returns the index of
     // the view this frame finished, if any; its image is converged by then.
-    std::optional<size_t> Record(const Renderer::DrawFrameTime& frameTime);
+    std::optional<size_t> Record(const Renderer::DrawFrameTime& drawTime, const Profiling::FrameTime& frameTime);
     // Where to save the screenshot of a view: next to the results file
     std::filesystem::path ScreenshotPath(size_t viewIndex) const;
     void SetScreenshotSaved(size_t viewIndex) { m_Samples[viewIndex].screenshotSaved = true; }
@@ -61,6 +66,12 @@ private:
     {
         std::vector<float> dispatchMs;
         std::vector<float> frameMs;
+        // CPU side. While GPU-bound these mostly measure waiting on the GPU
+        // (fence wait ~ GPU time), but they show if that ever stops being true.
+        std::vector<float> cpuTotalMs;
+        std::vector<float> recordMs;
+        std::vector<float> submitMs; // Includes presentKHR, which can block on the display
+        std::vector<float> fenceWaitMs;
         bool screenshotSaved = false;
     };
 

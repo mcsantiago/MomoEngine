@@ -52,7 +52,7 @@ Benchmark::Benchmark(BenchmarkSpecification spec)
     LOG_INFO("Benchmark", "Benchmarking {} views: {} warmup + {} measured frames each", m_Views.size(), m_Spec.WarmupFrames, m_Spec.MeasuredFrames);
 }
 
-std::optional<size_t> Benchmark::Record(const Renderer::DrawFrameTime& frameTime)
+std::optional<size_t> Benchmark::Record(const Renderer::DrawFrameTime& drawTime, const Profiling::FrameTime& frameTime)
 {
     if (IsFinished())
         return std::nullopt;
@@ -60,10 +60,15 @@ std::optional<size_t> Benchmark::Record(const Renderer::DrawFrameTime& frameTime
     m_FramesInView++;
     // Timings describe a frame from MAX_FRAMES_IN_FLIGHT frames ago; the warmup
     // makes sure that frame already showed this view
-    if (m_FramesInView > m_Spec.WarmupFrames && frameTime.hasRayTracingMs)
+    if (m_FramesInView > m_Spec.WarmupFrames && drawTime.hasRayTracingMs)
     {
-        m_Samples[m_ViewIndex].dispatchMs.push_back(frameTime.rayTracingMs);
-        m_Samples[m_ViewIndex].frameMs.push_back(frameTime.gpuFrameMs);
+        ViewSamples& samples = m_Samples[m_ViewIndex];
+        samples.dispatchMs.push_back(drawTime.rayTracingMs);
+        samples.frameMs.push_back(drawTime.gpuFrameMs);
+        samples.cpuTotalMs.push_back(frameTime.cpuTotalMs);
+        samples.recordMs.push_back(frameTime.recordMs);
+        samples.submitMs.push_back(frameTime.submitMs);
+        samples.fenceWaitMs.push_back(frameTime.fenceWaitMs);
     }
 
     if (m_Samples[m_ViewIndex].dispatchMs.size() == m_Spec.MeasuredFrames)
@@ -96,9 +101,14 @@ bool Benchmark::WriteResults(const BenchmarkEnvironment& environment) const
             : "";
         views += std::format(R"({}    {{ "name": {}, "position": [{}, {}, {}], "yaw": {}, "pitch": {},
       "dispatch_ms": {},
-      "frame_ms": {}{} }})",
+      "frame_ms": {},
+      "cpu_total_ms": {},
+      "record_ms": {},
+      "submit_ms": {},
+      "fence_wait_ms": {}{} }})",
             i > 0 ? ",\n" : "", JsonString(view.Name), view.Position.x, view.Position.y, view.Position.z, view.Yaw, view.Pitch,
-            StatsJson(m_Samples[i].dispatchMs), StatsJson(m_Samples[i].frameMs), screenshot);
+            StatsJson(m_Samples[i].dispatchMs), StatsJson(m_Samples[i].frameMs), StatsJson(m_Samples[i].cpuTotalMs),
+            StatsJson(m_Samples[i].recordMs), StatsJson(m_Samples[i].submitMs), StatsJson(m_Samples[i].fenceWaitMs), screenshot);
     }
 
     std::string json = std::format(R"({{
@@ -108,12 +118,16 @@ bool Benchmark::WriteResults(const BenchmarkEnvironment& environment) const
   "bounces": {},
   "warmup_frames": {},
   "frames_per_view": {},
+  "bvh": {{ "triangles": {}, "nodes": {}, "leaves": {}, "max_depth": {}, "max_leaf_triangles": {}, "sah_cost": {:.2f}, "build_ms": {:.1f}, "gpu_mb": {:.1f} }},
   "views": [
 {}
   ]
 }}
 )", today, JsonString(environment.Gpu), environment.Width, environment.Height, environment.Bounces,
-        m_Spec.WarmupFrames, m_Spec.MeasuredFrames, views);
+        m_Spec.WarmupFrames, m_Spec.MeasuredFrames,
+        environment.Triangles, environment.Bvh.nodeCount, environment.Bvh.leafCount, environment.Bvh.maxDepth,
+        environment.Bvh.maxLeafTriangles, environment.Bvh.sahCost, environment.Bvh.buildMs, environment.GpuBytes / (1024.0 * 1024.0),
+        views);
 
     std::ofstream file(m_Spec.OutputPath);
     if (!file)

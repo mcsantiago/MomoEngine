@@ -200,12 +200,18 @@ namespace Renderer {
         auto upload = [this](const auto& items) {
             return CreateDeviceLocalBuffer(items.data(), sizeof(items[0]) * items.size(), vk::BufferUsageFlagBits::eStorageBuffer);
         };
+        size_t totalBytes = sizeof(RayTracing::BvhNode) * geometry.bvh.nodes.size()
+                          + sizeof(RayTracing::TrianglePositions) * geometry.positions.size()
+                          + sizeof(RayTracing::TriangleShading) * geometry.shading.size()
+                          + sizeof(RayTracing::RayTracingMaterial) * geometry.materials.size();
         m_RayTracingScene.emplace(RayTracingSceneBuffers{
             .nodes = upload(geometry.bvh.nodes),
             .positions = upload(geometry.positions),
             .shading = upload(geometry.shading),
             .materials = upload(geometry.materials),
             .stats = geometry.bvh.stats,
+            .triangleCount = geometry.positions.size(),
+            .gpuBytes = totalBytes,
         });
         m_RayTracingTextureViews = std::move(textureViews);
         m_AccumulatedSamples = 0;
@@ -215,10 +221,6 @@ namespace Renderer {
         }
         WriteRayTracingDescriptorSet();
 
-        size_t totalBytes = sizeof(RayTracing::BvhNode) * geometry.bvh.nodes.size()
-                          + sizeof(RayTracing::TrianglePositions) * geometry.positions.size()
-                          + sizeof(RayTracing::TriangleShading) * geometry.shading.size()
-                          + sizeof(RayTracing::RayTracingMaterial) * geometry.materials.size();
         LOG_INFO("VulkanRenderer", "Uploaded ray tracing scene: {} triangles, {} materials, {} textures, {:.1f} MB",
                  geometry.positions.size(), geometry.materials.size(), geometry.textures.size(), totalBytes / (1024.0 * 1024.0));
     }

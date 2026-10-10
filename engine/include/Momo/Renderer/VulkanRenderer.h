@@ -55,6 +55,8 @@ struct RayTracingSceneBuffers
     AllocatedBuffer shading;
     AllocatedBuffer materials;
     RayTracing::BvhStats stats;
+    size_t triangleCount;
+    size_t gpuBytes; // All four buffers
 };
 
 class VulkanRenderer
@@ -75,6 +77,7 @@ public:
     // False if the device can't present a ray traced image or no scene was uploaded
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
     uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
+    const RayTracingSceneBuffers* GetRayTracingScene() const { return m_RayTracingScene ? &*m_RayTracingScene : nullptr; }
     // Saves the latest ray traced frame (tonemapped) as a JPEG. Waits for the GPU to go idle.
     bool SaveRayTracingOutput(const std::filesystem::path& path);
 
