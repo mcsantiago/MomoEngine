@@ -2,6 +2,7 @@
 #include "Momo/Logging/Logger.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <format>
 #include <fstream>
@@ -51,10 +52,10 @@ Benchmark::Benchmark(BenchmarkSpecification spec)
     LOG_INFO("Benchmark", "Benchmarking {} views: {} warmup + {} measured frames each", m_Views.size(), m_Spec.WarmupFrames, m_Spec.MeasuredFrames);
 }
 
-void Benchmark::Record(const Renderer::DrawFrameTime& frameTime)
+std::optional<size_t> Benchmark::Record(const Renderer::DrawFrameTime& frameTime)
 {
     if (IsFinished())
-        return;
+        return std::nullopt;
 
     m_FramesInView++;
     // Timings describe a frame from MAX_FRAMES_IN_FLIGHT frames ago; the warmup
@@ -68,9 +69,17 @@ void Benchmark::Record(const Renderer::DrawFrameTime& frameTime)
     if (m_Samples[m_ViewIndex].dispatchMs.size() == m_Spec.MeasuredFrames)
     {
         LOG_INFO("Benchmark", "View '{}' done", m_Views[m_ViewIndex].Name);
-        m_ViewIndex++;
         m_FramesInView = 0;
+        return m_ViewIndex++;
     }
+    return std::nullopt;
+}
+
+std::filesystem::path Benchmark::ScreenshotPath(size_t viewIndex) const
+{
+    std::string fileName = m_Views[viewIndex].Name;
+    std::transform(fileName.begin(), fileName.end(), fileName.begin(), [](unsigned char c) { return std::tolower(c); });
+    return m_Spec.OutputPath.parent_path() / (fileName + ".jpg");
 }
 
 bool Benchmark::WriteResults(const BenchmarkEnvironment& environment) const
@@ -81,11 +90,15 @@ bool Benchmark::WriteResults(const BenchmarkEnvironment& environment) const
     for (size_t i = 0; i < m_Views.size() && i < m_ViewIndex; i++)
     {
         const BenchmarkView& view = m_Views[i];
+        std::string screenshot = m_Samples[i].screenshotSaved
+            ? std::format(R"(,
+      "screenshot": {})", JsonString(ScreenshotPath(i).filename().string()))
+            : "";
         views += std::format(R"({}    {{ "name": {}, "position": [{}, {}, {}], "yaw": {}, "pitch": {},
       "dispatch_ms": {},
-      "frame_ms": {} }})",
+      "frame_ms": {}{} }})",
             i > 0 ? ",\n" : "", JsonString(view.Name), view.Position.x, view.Position.y, view.Position.z, view.Yaw, view.Pitch,
-            StatsJson(m_Samples[i].dispatchMs), StatsJson(m_Samples[i].frameMs));
+            StatsJson(m_Samples[i].dispatchMs), StatsJson(m_Samples[i].frameMs), screenshot);
     }
 
     std::string json = std::format(R"({{

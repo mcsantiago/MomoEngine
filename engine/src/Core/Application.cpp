@@ -169,7 +169,11 @@ namespace Momo
             // Frames before the ray tracing geometry is uploaded render raster and don't count
             if (m_Benchmark && drawFrameTime.has_value() && m_Renderer.IsRayTracingAvailable())
             {
-                m_Benchmark->Record(*drawFrameTime);
+                if (std::optional<size_t> finishedView = m_Benchmark->Record(*drawFrameTime))
+                {
+                    if (m_Renderer.SaveRayTracingOutput(m_Benchmark->ScreenshotPath(*finishedView)))
+                        m_Benchmark->SetScreenshotSaved(*finishedView);
+                }
                 if (m_Benchmark->IsFinished())
                 {
                     vk::Extent2D extent = m_Renderer.GetSwapchainExtent();

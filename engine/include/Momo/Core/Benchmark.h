@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 #include <glm/glm.hpp>
@@ -47,8 +48,12 @@ public:
     const BenchmarkView& CurrentView() const { return m_Views[m_ViewIndex]; }
     bool IsFinished() const { return m_ViewIndex >= m_Views.size(); }
 
-    // Call once per ray traced frame, after rendering it
-    void Record(const Renderer::DrawFrameTime& frameTime);
+    // Call once per ray traced frame, after rendering it. Returns the index of
+    // the view this frame finished, if any; its image is converged by then.
+    std::optional<size_t> Record(const Renderer::DrawFrameTime& frameTime);
+    // Where to save the screenshot of a view: next to the results file
+    std::filesystem::path ScreenshotPath(size_t viewIndex) const;
+    void SetScreenshotSaved(size_t viewIndex) { m_Samples[viewIndex].screenshotSaved = true; }
     bool WriteResults(const BenchmarkEnvironment& environment) const;
 
 private:
@@ -56,6 +61,7 @@ private:
     {
         std::vector<float> dispatchMs;
         std::vector<float> frameMs;
+        bool screenshotSaved = false;
     };
 
     BenchmarkSpecification m_Spec;

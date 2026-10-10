@@ -5,6 +5,9 @@
 #include "Momo/Logging/Logger.h"
 #include <glm/gtc/matrix_inverse.hpp>
 #include <algorithm>
+#include <cmath>
+#include <glm/gtc/packing.hpp>
+#include <stb_image_write.h>
 
 namespace Momo {
 namespace Renderer {
@@ -250,6 +253,61 @@ namespace Renderer {
         writes[5] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 5, 0, vk::DescriptorType::eCombinedImageSampler, textureInfos);
         writes[6] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 6, 0, vk::DescriptorType::eStorageImage, accumulationInfo);
         m_Device->updateDescriptorSets(writes, nullptr);
+    }
+
+    bool VulkanRenderer::SaveRayTracingOutput(const std::filesystem::path& path)
+    {
+        if (!m_RayTracingOutput) {
+            return false;
+        }
+        // The last frame's blit left the output image as a transfer source
+        m_Device->waitIdle();
+
+        const uint32_t width = m_RayTracingOutput->width;
+        const uint32_t height = m_RayTracingOutput->height;
+        const vk::DeviceSize size = vk::DeviceSize(width) * height * 4 * sizeof(uint16_t); // rgba16f
+
+        auto buffer = vk::raii::Buffer(*m_Device, vk::BufferCreateInfo({}, size, vk::BufferUsageFlagBits::eTransferDst, vk::SharingMode::eExclusive));
+        vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
+        uint32_t memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+        auto memory = vk::raii::DeviceMemory(*m_Device, vk::MemoryAllocateInfo(memRequirements.size, memoryTypeIndex));
+        buffer.bindMemory(*memory, 0);
+
+        auto commandBuffer = BeginSingleUseCommandBuffer();
+        vk::BufferImageCopy region(0, 0, 0, vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1),
+                                   vk::Offset3D{ 0, 0, 0 }, vk::Extent3D{ width, height, 1 });
+        commandBuffer.copyImageToBuffer(*m_RayTracingOutput->image, vk::ImageLayout::eTransferSrcOptimal, *buffer, region);
+        // Make the copy visible to the host read below
+        vk::MemoryBarrier2 toHost(vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite,
+                                  vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
+        vk::DependencyInfo dependencyInfo{};
+        dependencyInfo.setMemoryBarriers(toHost);
+        commandBuffer.pipelineBarrier2(dependencyInfo);
+        EndSingleUseCommandBuffer(commandBuffer);
+
+        // Half floats in linear light (already tonemapped) -> 8-bit sRGB, which
+        // is what the blit to the swapchain does for display
+        auto toSrgb8 = [](float linear) {
+            linear = std::clamp(linear, 0.0f, 1.0f);
+            float encoded = linear <= 0.0031308f ? linear * 12.92f : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+            return static_cast<uint8_t>(std::lround(encoded * 255.0f));
+        };
+        const auto* halves = static_cast<const uint16_t*>(memory.mapMemory(0, size));
+        std::vector<uint8_t> pixels(size_t(width) * height * 3);
+        for (size_t i = 0; i < size_t(width) * height; i++) {
+            for (size_t channel = 0; channel < 3; channel++) {
+                pixels[i * 3 + channel] = toSrgb8(glm::unpackHalf1x16(halves[i * 4 + channel]));
+            }
+        }
+        memory.unmapMemory();
+
+        if (!stbi_write_jpg(path.string().c_str(), int(width), int(height), 3, pixels.data(), 90)) {
+            LOG_ERROR("VulkanRenderer", "Couldn't write screenshot {}", path.string());
+            return false;
+        }
+        LOG_INFO("VulkanRenderer", "Saved ray traced frame to {}", path.string());
+        return true;
     }
 
     void VulkanRenderer::RecordRayTracingPass(uint32_t imageIndex, const glm::mat4& viewMatrix)

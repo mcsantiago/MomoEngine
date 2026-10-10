@@ -13,6 +13,7 @@ review the change there first, since pushing publishes it.
 """
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_SITE = Path.home() / "repos" / "mcsantiago.github.io"
 DATA_FILE = Path("_data") / "momoengine_benchmarks.json"
+# Screenshots of each view; the latest run's replace the previous ones
+IMAGE_DIR = Path("images") / "momoengine" / "benchmarks"
 
 
 def git(*args):
@@ -68,6 +71,17 @@ def main():
         sys.exit(f"A run for {run['commit']} labelled '{run['label']}' already exists (pass --replace to overwrite it).")
     for i in reversed(existing):
         del data["runs"][i]
+
+    # Screenshots are saved next to the results file
+    for view, run_view in zip(results["views"], run["views"]):
+        if "screenshot" not in view:
+            continue
+        source = args.results.parent / view["screenshot"]
+        if not source.exists():
+            sys.exit(f"Screenshot {source} listed in the results is missing")
+        (args.site / IMAGE_DIR).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, args.site / IMAGE_DIR / source.name)
+        run_view["screenshot"] = "/" + (IMAGE_DIR / source.name).as_posix()
 
     data["runs"].append(run)
     data_path.write_text(json.dumps(data, indent=2) + "\n")

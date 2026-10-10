@@ -2,6 +2,7 @@
 #include <vulkan/vulkan_raii.hpp>
 #include <vector>
 #include <string>
+#include <filesystem>
 #include <array>
 #include <optional>
 #include <cstdint>
@@ -74,6 +75,8 @@ public:
     // False if the device can't present a ray traced image or no scene was uploaded
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
     uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
+    // Saves the latest ray traced frame (tonemapped) as a JPEG. Waits for the GPU to go idle.
+    bool SaveRayTracingOutput(const std::filesystem::path& path);
 
     // For benchmark reports
     std::string GetDeviceName() const { return m_PhysicalDevice->getProperties().deviceName.data(); }
