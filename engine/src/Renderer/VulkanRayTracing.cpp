@@ -99,7 +99,7 @@ namespace Renderer {
             auto shaderCode = ReadFile(shaderPath);
             vk::raii::ShaderModule shaderModule = CreateShaderModule(shaderCode);
             vk::ComputePipelineCreateInfo pipelineInfo(
-                {},
+                m_PipelineStatisticsEnabled ? vk::PipelineCreateFlagBits::eCaptureStatisticsKHR : vk::PipelineCreateFlags{},
                 vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *shaderModule, "compMain"),
                 **m_RayTracingPipelineLayout
             );
@@ -108,6 +108,7 @@ namespace Renderer {
         m_RayTracingPipeline = createPipeline("shaders/raytrace.comp.spv");
         // Same shader compiled with COUNT_TRAVERSAL, for benchmarks
         m_RayTracingCountingPipeline = createPipeline("shaders/raytrace_counters.comp.spv");
+        LogPipelineStatistics(*m_RayTracingPipeline, "raytrace");
 
         std::array<uint32_t, 2 * TraversalCounterCount> zeros{};
         m_TraversalCounterBuffer.emplace(CreateBuffer(zeros.data(), sizeof(zeros), vk::BufferUsageFlagBits::eStorageBuffer, 0));
@@ -268,6 +269,30 @@ namespace Renderer {
         writes[6] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 6, 0, vk::DescriptorType::eStorageImage, accumulationInfo);
         writes[7] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 7, 0, vk::DescriptorType::eStorageBuffer, nullptr, counterInfo);
         m_Device->updateDescriptorSets(writes, nullptr);
+    }
+
+    // What the driver's compiler made of a pipeline's shader: on NVIDIA this
+    // includes registers per thread, which limit how many threads run at once
+    void VulkanRenderer::LogPipelineStatistics(const vk::raii::Pipeline& pipeline, const std::string& name)
+    {
+        if (!m_PipelineStatisticsEnabled) {
+            return;
+        }
+        auto executables = m_Device->getPipelineExecutablePropertiesKHR(vk::PipelineInfoKHR(*pipeline));
+        for (uint32_t i = 0; i < executables.size(); i++) {
+            LOG_INFO("VulkanRenderer", "Pipeline '{}' executable {} ({}), subgroup size {}:", name, i,
+                     executables[i].name.data(), executables[i].subgroupSize);
+            for (const auto& statistic : m_Device->getPipelineExecutableStatisticsKHR(vk::PipelineExecutableInfoKHR(*pipeline, i))) {
+                std::string value;
+                switch (statistic.format) {
+                    case vk::PipelineExecutableStatisticFormatKHR::eBool32: value = statistic.value.b32 ? "true" : "false"; break;
+                    case vk::PipelineExecutableStatisticFormatKHR::eInt64: value = std::to_string(statistic.value.i64); break;
+                    case vk::PipelineExecutableStatisticFormatKHR::eUint64: value = std::to_string(statistic.value.u64); break;
+                    case vk::PipelineExecutableStatisticFormatKHR::eFloat64: value = std::to_string(statistic.value.f64); break;
+                }
+                LOG_INFO("VulkanRenderer", "  {}: {} ({})", statistic.name.data(), value, statistic.description.data());
+            }
+        }
     }
 
     TraversalCounts VulkanRenderer::ReadAndResetTraversalCounters()

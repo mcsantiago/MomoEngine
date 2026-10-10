@@ -224,6 +224,8 @@ private:
     std::optional<vk::raii::Pipeline> m_RayTracingCountingPipeline;
     std::optional<AllocatedBuffer> m_TraversalCounterBuffer; // (low, high) word pairs, host visible
     bool m_CountTraversal = false;
+    bool m_PipelineStatisticsEnabled = false; // VK_KHR_pipeline_executable_properties enabled
+    void LogPipelineStatistics(const vk::raii::Pipeline& pipeline, const std::string& name);
     DescriptorAllocator m_RayTracingDescriptorAllocator;
     vk::DescriptorSet m_RayTracingDescriptorSet; // Allocated on first upload
     std::vector<vk::ImageView> m_RayTracingTextureViews; // Owned by the caller's texture cache
@@ -251,6 +253,7 @@ private:
 
     std::vector<const char*> m_OptionalDeviceExtensions = {
         "VK_KHR_portability_subset", // For MoltenVK on macOS
+        "VK_KHR_pipeline_executable_properties", // Compiled shader statistics (registers, ...), logged for ray tracing
     };
 
     std::vector<const char*> m_EnabledDeviceExtensions;

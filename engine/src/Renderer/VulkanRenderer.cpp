@@ -1260,8 +1260,15 @@ namespace Renderer {
         vulkan13Features.synchronization2 = VK_TRUE;
         vulkan13Features.pNext = &vulkan12Features;
 
+        // Optional: lets the renderer read back compiled shader statistics
+        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR executablePropertiesFeatures{};
+        m_PipelineStatisticsEnabled = std::any_of(m_EnabledDeviceExtensions.begin(), m_EnabledDeviceExtensions.end(),
+            [](const char* name) { return std::strcmp(name, vk::KHRPipelineExecutablePropertiesExtensionName) == 0; });
+        executablePropertiesFeatures.pipelineExecutableInfo = m_PipelineStatisticsEnabled;
+        executablePropertiesFeatures.pNext = &vulkan13Features;
+
         vk::PhysicalDeviceFeatures2 features2{};
-        features2.pNext = &vulkan13Features;
+        features2.pNext = &executablePropertiesFeatures;
 
         // create a Device
         float queuePriority = 1.0f;
