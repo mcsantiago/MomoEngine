@@ -58,7 +58,16 @@ struct PushConstants {
 };
 [vk::push_constant] ConstantBuffer<PushConstants> pc;
 
+// The sun: direction toward it, and how much light it delivers to a surface
+// facing it head-on (irradiance; the sky's brightness is the reference)
 static const float3 lightDir = normalize(float3(0.5, 1.0, 0.3));
+static const float3 SunIrradiance = float3(1.0, 0.95, 0.85) * 8.0;
+static const float Pi = 3.14159265;
+// Bounces after the camera ray hits a surface. Each one adds a closest-hit
+// ray and a shadow ray per pixel.
+static const uint MaxBounces = 5;
+// Scales the light before tonemapping; higher is brighter
+static const float Exposure = 1.0;
 static const float Infinity = asfloat(0x7f800000);
 // Near-first traversal pushes at most one node per level, so the BVH build's
 // maxDepth (32 by default) bounds this
@@ -238,32 +247,49 @@ float3 OffsetFromSurface(float3 position, float3 normal)
     return position + normal * (1e-4 * scale);
 }
 
-float3 Shade(Ray ray, Hit hit)
+// What the path tracer needs to know about a hit point
+struct Surface {
+    float3 position;
+    float3 normal;     // Smoothed (interpolated) normal, facing the incoming ray
+    float3 faceNormal; // Flat triangle normal, facing the incoming ray
+    float3 albedo;     // Fraction of light reflected, per channel (the base color)
+};
+
+Surface GetSurface(Ray ray, Hit hit)
 {
     TriangleShading triangle = shading[hit.triangle];
     float w = 1.0 - hit.u - hit.v;
-    float3 normal = normalize(triangle.normal0.xyz * w + triangle.normal1.xyz * hit.u + triangle.normal2.xyz * hit.v);
-    // Triangles are hit from both sides; light the side facing the camera
-    if (dot(normal, ray.direction) > 0.0)
-        normal = -normal;
 
-    // The offset uses the true (flat) triangle normal: the interpolated one
-    // can tilt into the surface near silhouettes
+    Surface surface;
+    surface.position = ray.origin + ray.direction * hit.t;
+    surface.normal = normalize(triangle.normal0.xyz * w + triangle.normal1.xyz * hit.u + triangle.normal2.xyz * hit.v);
+    // Triangles are hit from both sides; use the side the ray arrived from
+    if (dot(surface.normal, ray.direction) > 0.0)
+        surface.normal = -surface.normal;
+
+    // Rays leave along the flat normal: the smoothed one can tilt into the
+    // surface near silhouettes
     TrianglePositions positions = triangles[hit.triangle];
-    float3 faceNormal = normalize(cross(positions.v1.xyz - positions.v0.xyz, positions.v2.xyz - positions.v0.xyz));
-    if (dot(faceNormal, ray.direction) > 0.0)
-        faceNormal = -faceNormal;
-    float3 position = ray.origin + ray.direction * hit.t;
+    surface.faceNormal = normalize(cross(positions.v1.xyz - positions.v0.xyz, positions.v2.xyz - positions.v0.xyz));
+    if (dot(surface.faceNormal, ray.direction) > 0.0)
+        surface.faceNormal = -surface.faceNormal;
 
-    Material material = materials[triangle.materialIndex];
-    float3 baseColor = SampleBaseColor(material, InterpolateUV(triangle, hit)).rgb;
-    float diffuse = max(dot(normal, lightDir), 0.0);
+    surface.albedo = SampleBaseColor(materials[triangle.materialIndex], InterpolateUV(triangle, hit)).rgb;
+    return surface;
+}
+
+// Light from the sun reflected toward the viewer by a matte (Lambertian)
+// surface: albedo / pi * irradiance * cos(angle to the sun), if the sun is visible
+float3 DirectSunlight(Surface surface)
+{
+    float cosine = dot(surface.normal, lightDir);
     // A triangle whose flat side faces away from the sun shadows itself, even
     // if its smoothed normal still leans toward the sun. Otherwise trace a
     // shadow ray, but only if there's direct light to lose.
-    if (diffuse > 0.0 && (dot(faceNormal, lightDir) <= 0.0 || !SeesSun(OffsetFromSurface(position, faceNormal))))
-        diffuse = 0.0;
-    return baseColor * (0.15 + 0.85 * diffuse);
+    if (cosine <= 0.0 || dot(surface.faceNormal, lightDir) <= 0.0 ||
+        !SeesSun(OffsetFromSurface(surface.position, surface.faceNormal)))
+        return float3(0.0);
+    return surface.albedo / Pi * SunIrradiance * cosine;
 }
 
 // PCG hash (Jarzynski & Olano, "Hash Functions for GPU Rendering", 2020):
@@ -280,6 +306,70 @@ float NextRandom(inout uint rngState)
 {
     rngState = PcgHash(rngState);
     return float(rngState >> 8) * (1.0 / 16777216.0);
+}
+
+// A random direction above the surface, more likely near the normal
+// (probability proportional to cos(angle to the normal)). For a matte
+// surface that cosine is exactly how much each direction's light counts, so
+// sampling this way makes every bounce's weight simply the albedo.
+float3 RandomCosineDirection(float3 normal, inout uint rngState)
+{
+    // Point on a unit disk, projected up onto the hemisphere
+    float phi = 2.0 * Pi * NextRandom(rngState);
+    float r2 = NextRandom(rngState);
+    float r = sqrt(r2);
+    float3 local = float3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r2)));
+
+    // Rotate from "z is up" to "normal is up" (orthonormal basis without a
+    // branch on the normal's direction: Duff et al. 2017)
+    float sign = normal.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (sign + normal.z);
+    float b = normal.x * normal.y * a;
+    float3 tangent = float3(1.0 + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+    float3 bitangent = float3(b, sign + normal.y * normal.y * a, -normal.y);
+    return normalize(local.x * tangent + local.y * bitangent + local.z * normal);
+}
+
+// Follows one light path backwards from the camera: at each surface, add the
+// sunlight it reflects toward us, then continue in a random direction to find
+// the light arriving from there. throughput is how much of that light makes
+// it back to the camera after the surfaces passed so far.
+float3 TracePath(Ray ray, inout uint rngState)
+{
+    float3 radiance = float3(0.0);
+    float3 throughput = float3(1.0);
+
+    for (uint bounce = 0; bounce <= MaxBounces; bounce++)
+    {
+        Hit hit;
+        if (!IntersectScene(ray, 0.0, Infinity, false, hit))
+        {
+            radiance += throughput * Sky(ray.direction);
+            break;
+        }
+
+        Surface surface = GetSurface(ray, hit);
+        radiance += throughput * DirectSunlight(surface);
+        if (bounce == MaxBounces)
+            break;
+
+        ray.direction = RandomCosineDirection(surface.normal, rngState);
+        // Sampled around the smoothed normal, a direction can still point
+        // into the actual triangle; that path ends here
+        if (dot(ray.direction, surface.faceNormal) <= 0.0)
+            break;
+        ray.origin = OffsetFromSurface(surface.position, surface.faceNormal);
+        throughput *= surface.albedo;
+    }
+    return radiance;
+}
+
+// Maps unbounded light values into displayable 0-1, rolling off highlights
+// instead of clipping them (Narkowicz's fit of the ACES filmic curve)
+float3 Tonemap(float3 color)
+{
+    color *= Exposure;
+    return saturate((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14));
 }
 
 [shader("compute")]
@@ -306,11 +396,11 @@ void compMain(uint3 threadId : SV_DispatchThreadID)
     ray.origin = pc.cameraPosition.xyz;
     ray.direction = normalize(target.xyz / target.w - ray.origin);
 
-    Hit hit;
-    float3 color = IntersectScene(ray, 0.0, Infinity, false, hit) ? Shade(ray, hit) : Sky(ray.direction);
+    float3 color = TracePath(ray, rngState);
 
     // Fold this sample into the running average: after n samples each one
-    // has weight 1/n, without storing them all
+    // has weight 1/n, without storing them all. The average stays in linear
+    // light; only the displayed copy is tonemapped.
     float3 average = color;
     if (pc.sampleCount > 1)
     {
@@ -318,5 +408,5 @@ void compMain(uint3 threadId : SV_DispatchThreadID)
         average = previous + (color - previous) / float(pc.sampleCount);
     }
     accumulationImage[threadId.xy] = float4(average, 1.0);
-    outputImage[threadId.xy] = float4(average, 1.0);
+    outputImage[threadId.xy] = float4(Tonemap(average), 1.0);
 }
