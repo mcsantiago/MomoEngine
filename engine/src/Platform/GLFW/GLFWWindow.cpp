@@ -84,6 +84,7 @@ namespace Momo
                 inputState.keys.SetKeyState(Input::Key::P, true);
             }
             glfwGetCursorPos(m_Window, &inputState.mouseX, &inputState.mouseY);
+            inputState.windowFocused = glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
 
             // LOG_INFO("Input", "Mouse Position: ({}, {})", inputState.mouseX, inputState.mouseY);
             return inputState;

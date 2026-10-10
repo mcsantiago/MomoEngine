@@ -50,6 +50,7 @@ struct InputState {
     bool mouseButtons[8] = { false };
     double mouseX = 0;
     double mouseY = 0;
+    bool windowFocused = false;
 };
 
 class InputManager {

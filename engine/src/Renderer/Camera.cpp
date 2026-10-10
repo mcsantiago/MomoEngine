@@ -15,8 +15,11 @@ void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
         m_FirstMouse = false;
     }
 
-    int deltaX = inputState.mouseX - m_LastMouseX;
-    int deltaY = inputState.mouseY - m_LastMouseY;
+    // The cursor position keeps changing while other windows have focus; only
+    // turn the camera for movement made while ours does. Tracking the position
+    // regardless keeps the camera from jumping when focus comes back.
+    int deltaX = inputState.windowFocused ? inputState.mouseX - m_LastMouseX : 0;
+    int deltaY = inputState.windowFocused ? inputState.mouseY - m_LastMouseY : 0;
     m_LastMouseX = inputState.mouseX;
     m_LastMouseY = inputState.mouseY;
 
