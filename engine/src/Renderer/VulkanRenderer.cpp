@@ -113,8 +113,11 @@ namespace
             return actualExtent;
         }
     }
+}
 
-    static std::vector<char> ReadFile(const std::string& filename)
+namespace Momo {
+namespace Renderer {
+    std::vector<char> VulkanRenderer::ReadFile(const std::string& filename)
     {
         LOG_DEBUG("VulkanRenderer", "Reading shader file: {}", filename);
         std::ifstream file(filename, std::ios::ate | std::ios::binary);
@@ -133,10 +136,7 @@ namespace
         LOG_DEBUG("VulkanRenderer", "File read into buffer");
         return buffer;
     }
-}
 
-namespace Momo {
-namespace Renderer {
     static vk::VertexInputBindingDescription GetBindingDescription() {
         vk::VertexInputBindingDescription bindingDescription(
             0,                          // binding
@@ -191,6 +191,12 @@ namespace Renderer {
         CreateDescriptorSetLayout();
         LOG_DEBUG("VulkanRenderer", "Creating graphics pipeline...");
         CreateGraphicsPipeline();
+        LOG_DEBUG("VulkanRenderer", "Checking ray tracing support...");
+        CheckRayTracingSupport();
+        if (m_RayTracingSupported) {
+            CreateRayTracingPipeline();
+            CreateRayTracingOutputImage();
+        }
         LOG_DEBUG("VulkanRenderer", "Creating command pool...");
         CreateCommandPool();
         LOG_DEBUG("VulkanRenderer", "Creating command buffers...");
@@ -316,7 +322,7 @@ namespace Renderer {
         m_GraphicsQueue->waitIdle();
     }
 
-    void VulkanRenderer::BeginFrame(uint32_t imageIndex)
+    void VulkanRenderer::BeginFrame()
     {
         // Implementation for beginning a frame
         LOG_DEBUG("VulkanRenderer", "Beginning a frame...");
@@ -333,7 +339,10 @@ namespace Renderer {
             m_CommandBuffers[m_CurrentFrame].resetQueryPool(**m_TimestampQueryPool, firstQuery, 2);
             m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, **m_TimestampQueryPool, firstQuery);
         }
+    }
 
+    void VulkanRenderer::RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix)
+    {
         vk::ImageMemoryBarrier2 toColorAttachment{};
         toColorAttachment.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
         toColorAttachment.srcAccessMask = {};
@@ -398,22 +407,63 @@ namespace Renderer {
         renderingInfo.pDepthAttachment = &depthAttachment;
 
         m_CommandBuffers[m_CurrentFrame].beginRendering(renderingInfo);
+
+        // Draw
+        m_CommandBuffers[m_CurrentFrame].bindPipeline(vk::PipelineBindPoint::eGraphics, **m_GraphicsPipeline);
+        m_CommandBuffers[m_CurrentFrame].setViewport(0, vk::Viewport(
+            0.0f, 0.0f, 
+            static_cast<float>(m_SwapchainExtent.width), 
+            static_cast<float>(m_SwapchainExtent.height), 
+            0.0f, 1.0f));
+
+        m_CommandBuffers[m_CurrentFrame].setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
+
+        for (const auto& mesh : modelData.meshes) {
+            m_CommandBuffers[m_CurrentFrame].setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
+            m_CommandBuffers[m_CurrentFrame].bindDescriptorSets(
+                    vk::PipelineBindPoint::eGraphics, 
+                    **m_PipelineLayout, 
+                    0, 
+                    {mesh.materialData.descriptorSet}, 
+                    nullptr
+            );
+            m_CommandBuffers[m_CurrentFrame].bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
+            m_CommandBuffers[m_CurrentFrame].bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
+            PushConstantData pushConstantData;
+            pushConstantData.projectionMatrix = m_ProjectionMatrix;
+            pushConstantData.viewMatrix = viewMatrix;
+            pushConstantData.modelMatrix = modelMatrix * mesh.localTransform; // Move to GPU..?
+            m_CommandBuffers[m_CurrentFrame].pushConstants<PushConstantData>(
+                **m_PipelineLayout, 
+                vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 
+                0,
+                pushConstantData
+            );
+            m_CommandBuffers[m_CurrentFrame].drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0); 
+        }
+
+        m_CommandBuffers[m_CurrentFrame].endRendering();
     }
 
-    void VulkanRenderer::EndFrame(uint32_t imageIndex)
+    void VulkanRenderer::EndFrame(uint32_t imageIndex, RenderMode mode)
     {
         // Implementation for ending a frame
         LOG_DEBUG("VulkanRenderer", "Ending a frame...");
 
-        m_CommandBuffers[m_CurrentFrame].endRendering();
-
-        // Transition the swapchain image to present layout
+        // Transition the swapchain image to present layout. The raster pass
+        // leaves it as a color attachment; the ray tracing pass as a blit target.
         vk::ImageMemoryBarrier2 toPresent{};
-        toPresent.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
-        toPresent.srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+        if (mode == RenderMode::RayTraced) {
+            toPresent.srcStageMask = vk::PipelineStageFlagBits2::eBlit;
+            toPresent.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+            toPresent.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+        } else {
+            toPresent.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+            toPresent.srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+            toPresent.oldLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        }
         toPresent.dstStageMask = vk::PipelineStageFlagBits2::eBottomOfPipe;
         toPresent.dstAccessMask = {};
-        toPresent.oldLayout = vk::ImageLayout::eColorAttachmentOptimal;
         toPresent.newLayout = vk::ImageLayout::ePresentSrcKHR;
         toPresent.image = m_Swapchain->getImages()[imageIndex];
         toPresent.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
@@ -437,7 +487,10 @@ namespace Renderer {
         // Submit and present
         vk::Semaphore waitSemaphores[]   = { *m_ImageAvailableSemaphores[m_CurrentFrame] };
         vk::Semaphore signalSemaphores[] = { *m_RenderFinishedSemaphores[imageIndex] };
-        vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
+        // The swapchain image is first written by the raster pass's color output
+        // or the ray tracing pass's blit; work before that (e.g. the ray tracing
+        // dispatch) doesn't need to wait for the image to be acquired
+        vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eTransfer };
 
         vk::SubmitInfo submitInfo(waitSemaphores, waitStages, *m_CommandBuffers[m_CurrentFrame], signalSemaphores);
         m_GraphicsQueue->submit(submitInfo, *m_InFlightFences[m_CurrentFrame]);
@@ -457,9 +510,12 @@ namespace Renderer {
         m_SubmitTimer.End();
     }
 
-    DrawFrameTime VulkanRenderer::RenderFrame(VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix)
+    DrawFrameTime VulkanRenderer::RenderFrame(VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix, RenderMode mode)
     {
         DrawFrameTime frameTime{};
+        if (mode == RenderMode::RayTraced && !IsRayTracingAvailable()) {
+            mode = RenderMode::Raster;
+        }
 
         // Implementation for rendering a single frame using Vulkan
         LOG_DEBUG("VulkanRenderer", "Rendering a frame...");
@@ -498,43 +554,15 @@ namespace Renderer {
                     LOG_TRACE("VulkanRenderer", "GPU frame time: {} ms", m_LastGpuFrameMs);
                 }
             }
-            BeginFrame(imageIndex);
+            BeginFrame();
 
-            // Draw
-            m_CommandBuffers[m_CurrentFrame].bindPipeline(vk::PipelineBindPoint::eGraphics, **m_GraphicsPipeline);
-            m_CommandBuffers[m_CurrentFrame].setViewport(0, vk::Viewport(
-                0.0f, 0.0f, 
-                static_cast<float>(m_SwapchainExtent.width), 
-                static_cast<float>(m_SwapchainExtent.height), 
-                0.0f, 1.0f));
-
-            m_CommandBuffers[m_CurrentFrame].setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
-
-            for (const auto& mesh : modelData.meshes) {
-                m_CommandBuffers[m_CurrentFrame].setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
-                m_CommandBuffers[m_CurrentFrame].bindDescriptorSets(
-                        vk::PipelineBindPoint::eGraphics, 
-                        **m_PipelineLayout, 
-                        0, 
-                        {mesh.materialData.descriptorSet}, 
-                        nullptr
-                );
-                m_CommandBuffers[m_CurrentFrame].bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
-                m_CommandBuffers[m_CurrentFrame].bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
-                PushConstantData pushConstantData;
-                pushConstantData.projectionMatrix = m_ProjectionMatrix;
-                pushConstantData.viewMatrix = viewMatrix;
-                pushConstantData.modelMatrix = modelMatrix * mesh.localTransform; // Move to GPU..?
-                m_CommandBuffers[m_CurrentFrame].pushConstants<PushConstantData>(
-                    **m_PipelineLayout, 
-                    vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 
-                    0,
-                    pushConstantData
-                );
-                m_CommandBuffers[m_CurrentFrame].drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0); 
+            if (mode == RenderMode::RayTraced) {
+                RecordRayTracingPass(imageIndex, viewMatrix);
+            } else {
+                RecordRasterPass(imageIndex, modelData, viewMatrix, modelMatrix);
             }
 
-            EndFrame(imageIndex);
+            EndFrame(imageIndex, mode);
             frameTime.gpuFrameMs = m_LastGpuFrameMs;
             frameTime.fenceWaitMs = m_FenceWaitTimer.GetElapsedTimeInMs();
             frameTime.recordMs = m_RecordTimer.GetElapsedTimeInMs();
@@ -1090,7 +1118,8 @@ namespace Renderer {
             m_SwapchainImageFormat.colorSpace,    // imageColorSpace
             m_SwapchainExtent,                    // imageExtent
             1,                                    // imageArrayLayers -- always 1 unless you're developing stereoscopic 3D app
-            vk::ImageUsageFlagBits::eColorAttachment, // imageUsage
+            // Transfer dst lets the ray tracing pass blit into the image, where supported
+            vk::ImageUsageFlagBits::eColorAttachment | (surfaceCapabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eTransferDst), // imageUsage
             vk::SharingMode::eExclusive,          // imageSharingMode
             0, nullptr,                           // queueFamilyIndexCount, pQueueFamilyIndices
             surfaceCapabilities.currentTransform, // preTransform
@@ -1150,6 +1179,12 @@ namespace Renderer {
         LOG_DEBUG("VulkanRenderer", "\tCreated new image views for extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
         CreateRenderFinishedSemaphores();
         LOG_DEBUG("VulkanRenderer", "\tCreated new render finished semaphores for extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
+        if (m_RayTracingSupported) {
+            CreateRayTracingOutputImage();
+            if (m_RayTracingDescriptorSet) {
+                WriteRayTracingDescriptorSet();
+            }
+        }
         m_SubOptimal = false;
     }
 

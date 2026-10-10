@@ -80,6 +80,9 @@ namespace Momo
             if (glfwGetKey(m_Window, GLFW_KEY_SPACE) == GLFW_PRESS) {
                 inputState.keys.SetKeyState(Input::Key::Space, true);
             }
+            if (glfwGetKey(m_Window, GLFW_KEY_P) == GLFW_PRESS) {
+                inputState.keys.SetKeyState(Input::Key::P, true);
+            }
             glfwGetCursorPos(m_Window, &inputState.mouseX, &inputState.mouseY);
 
             // LOG_INFO("Input", "Mouse Position: ({}, {})", inputState.mouseX, inputState.mouseY);
@@ -106,6 +109,7 @@ namespace Momo
                 case GLFW_KEY_E: return Input::Key::E;
                 case GLFW_KEY_SPACE: return Input::Key::Space;
                 case GLFW_KEY_ESCAPE: return Input::Key::Escape;
+                case GLFW_KEY_P: return Input::Key::P;
                 default: return Input::Key::Escape; // Default fallback
             }
         }

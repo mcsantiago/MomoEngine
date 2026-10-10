@@ -53,7 +53,18 @@ void DescriptorAllocator::CreateDescriptorPool() {
         m_PoolSize
     );
 
-    std::array<vk::DescriptorPoolSize, 2> poolSizes = { poolSize, poolSizeUBO };
+    // Storage buffers and images are for the ray tracing pass
+    vk::DescriptorPoolSize poolSizeStorageBuffer(
+        vk::DescriptorType::eStorageBuffer,
+        m_PoolSize
+    );
+
+    vk::DescriptorPoolSize poolSizeStorageImage(
+        vk::DescriptorType::eStorageImage,
+        m_PoolSize
+    );
+
+    std::array<vk::DescriptorPoolSize, 4> poolSizes = { poolSize, poolSizeUBO, poolSizeStorageBuffer, poolSizeStorageImage };
 
     vk::DescriptorPoolCreateInfo poolInfo(
         {},

@@ -3,6 +3,7 @@
 #include <vector>
 #include <utility>
 #include <memory>
+#include <future>
 #include "Momo/Window.h"
 #include "Momo/Renderer/VulkanRenderer.h"
 #include "Momo/Renderer/Camera.h"
@@ -10,7 +11,6 @@
 #include "Momo/Assets/AssetRegistry.h"
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Core/Scene.h"
-#include "Momo/RayTracing/SceneGeometry.h"
 
 
 namespace Momo
@@ -19,6 +19,7 @@ namespace Momo
     {
         std::string Name = "Untitled";
         WindowSpecification WindowSpec{};
+        Renderer::RenderMode InitialRenderMode = Renderer::RenderMode::Raster; // Toggled at runtime with P
     };
 
     class Layer
@@ -56,6 +57,8 @@ namespace Momo
         
         uint64_t m_FrameCount = 0;
         Input::InputState m_InputState;
+        Renderer::RenderMode m_RenderMode;
+        bool m_ToggleRenderModeHeld = false; // Toggle once per press, not every frame the key is down
 
         std::unique_ptr<IWindow> m_Window;
         Renderer::VulkanRenderer m_Renderer; // Maybe this can be abstracted later
@@ -66,16 +69,22 @@ namespace Momo
         // Scene data
         std::optional<Scene> m_ActiveScene; 
         std::optional<Camera> m_Camera;
-        std::optional<RayTracing::SceneGeometry> m_RayTracingGeometry; // CPU-side; uploaded to the GPU in phase 2
         // std::optional<Renderer::VulkanModelData> m_Mesh; // TODO: Should be a full scene object as active scene
 
         Renderer::MeshGPUCache m_MeshCache;
         Renderer::TextureGPUCache m_TextureCache;
         Renderer::MaterialGPUCache m_MaterialCache;
 
+        // Ray tracing geometry being built on a worker thread. The worker reads
+        // m_AssetRegistry, so the registry must not be modified while this is
+        // valid. Declared after the registry so it is destroyed (and waited on) first.
+        std::future<RayTracing::SceneGeometry> m_PendingRayTracingGeometry;
+
         Renderer::VulkanModelData LoadMesh(const std::filesystem::path &path);
         std::optional<Renderer::DrawFrameTime> Draw(float dt);
         void LoadScene(const std::filesystem::path &path);
+        void StartRayTracingGeometryBuild();
+        void UploadRayTracingGeometryIfReady();
         void LoadDefaultAssets();
     };
 }

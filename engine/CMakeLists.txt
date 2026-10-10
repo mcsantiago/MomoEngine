@@ -5,6 +5,7 @@ add_library(MomoEngine STATIC
   src/Platform/GLFW/GLFWWindow.cpp
   src/Platform/GLFW/WindowVulkan.cpp
   src/Renderer/VulkanRenderer.cpp
+  src/Renderer/VulkanRayTracing.cpp
   include/Momo/Renderer/DescriptorAllocator.h
   src/Renderer/DescriptorAllocator.cpp
   include/Momo/Renderer/Camera.h
@@ -183,9 +184,35 @@ function(compile_slang_shader SHADER_SOURCE)
   set(COMPILED_SHADERS ${COMPILED_SHADERS} ${VERT_OUTPUT} ${FRAG_OUTPUT} PARENT_SCOPE)
 endfunction()
 
-# Compile triangle.slang
+# Compute shaders have a single stage, entry point compMain
+function(compile_slang_compute_shader SHADER_SOURCE)
+  get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME_WE)
+  set(COMP_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.comp.spv)
+
+  add_custom_command(
+    OUTPUT ${COMP_OUTPUT}
+    COMMAND ${SLANGC_EXECUTABLE}
+      -target spirv
+      -profile spirv_1_5
+      -emit-spirv-directly
+      -matrix-layout-column-major
+      -stage compute
+      -entry compMain
+      -fvk-use-entrypoint-name
+      -o ${COMP_OUTPUT}
+      ${SHADER_SOURCE}
+    DEPENDS ${SHADER_SOURCE}
+    COMMENT "Compiling compute shader: ${SHADER_NAME}.comp.spv"
+    VERBATIM
+  )
+
+  set(COMPILED_SHADERS ${COMPILED_SHADERS} ${COMP_OUTPUT} PARENT_SCOPE)
+endfunction()
+
+# Compile triangle.slang and raytrace.slang
 set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
 
 # Create custom target for all shaders
 add_custom_target(MomoShaders ALL

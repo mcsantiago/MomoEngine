@@ -12,12 +12,37 @@
 #include "Momo/Assets/ModelData.h"
 #include "Momo/Renderer/DescriptorAllocator.h"
 #include "Momo/Profiling/Timer.h"
+#include "Momo/RayTracing/SceneGeometry.h"
 
 namespace Momo {
 namespace Renderer {
 struct DrawFrameTime
 {
     float recordMs, submitMs, fenceWaitMs, gpuFrameMs;
+};
+
+enum class RenderMode
+{
+    Raster,
+    RayTraced
+};
+
+// Push constants of raytrace.slang: enough to rebuild each pixel's camera ray
+struct RayTracingPushConstants
+{
+    glm::mat4 inverseView;
+    glm::mat4 inverseProjection;
+};
+static_assert(sizeof(RayTracingPushConstants) == 128, "RayTracingPushConstants must fit the guaranteed 128 bytes");
+
+// GPU copies of RayTracing::SceneGeometry, in device-local storage buffers
+struct RayTracingSceneBuffers
+{
+    AllocatedBuffer nodes;
+    AllocatedBuffer positions;
+    AllocatedBuffer shading;
+    AllocatedBuffer materials;
+    RayTracing::BvhStats stats;
 };
 
 class VulkanRenderer
@@ -27,7 +52,13 @@ public:
 
     void Init(const IWindow& window);
     void Shutdown();
-    DrawFrameTime RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix);
+    DrawFrameTime RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix, RenderMode mode);
+
+    // Uploads the scene's ray tracing geometry and keeps only the GPU copy.
+    // Replaces any previously uploaded scene.
+    void UploadRayTracingScene(RayTracing::SceneGeometry geometry);
+    // False if the device can't present a ray traced image or no scene was uploaded
+    bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
 
     AllocatedBuffer     CreateVertexBuffer(const std::vector<Momo::Geometry::Vertex>& vertices);
     AllocatedBuffer     CreateIndexBuffer(const std::vector<uint32_t>& indices);
@@ -54,8 +85,19 @@ private:
     void CreateDescriptorSetLayout();
     void WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedBuffer& ubo, const AllocatedImage& textureImage);
 
-    void BeginFrame(uint32_t imageIndex);
-    void EndFrame(uint32_t imageIndex);
+    void BeginFrame();
+    void RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix);
+    void EndFrame(uint32_t imageIndex, RenderMode mode);
+
+    // Ray tracing (VulkanRayTracing.cpp)
+    void CheckRayTracingSupport();
+    void CreateRayTracingPipeline();
+    void CreateRayTracingOutputImage();
+    void WriteRayTracingDescriptorSet();
+    void RecordRayTracingPass(uint32_t imageIndex, const glm::mat4& viewMatrix);
+    AllocatedBuffer CreateDeviceLocalBuffer(const void* data, vk::DeviceSize size, vk::BufferUsageFlags usage);
+
+    static std::vector<char> ReadFile(const std::string& filename);
     vk::raii::ShaderModule CreateShaderModule(const std::vector<char>& code);
     uint32_t FindGraphicsQueueFamilyIdx(vk::raii::PhysicalDevice);
     uint32_t FindMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties);
@@ -120,6 +162,17 @@ private:
     // Texture Image resources
     std::optional<vk::raii::Sampler> m_TextureSampler;
     std::optional<vk::raii::DescriptorSetLayout> m_DescriptorSetLayout;
+
+    // Ray tracing resources
+    bool m_RayTracingSupported = false;
+    std::optional<RayTracingSceneBuffers> m_RayTracingScene;
+    std::optional<vk::raii::DescriptorSetLayout> m_RayTracingSetLayout;
+    std::optional<vk::raii::PipelineLayout> m_RayTracingPipelineLayout;
+    std::optional<vk::raii::Pipeline> m_RayTracingPipeline;
+    vk::DescriptorSet m_RayTracingDescriptorSet; // Allocated on first upload
+    // Shared by all frames in flight, like the depth buffer; sized to the swapchain
+    std::optional<AllocatedImage> m_RayTracingOutput;
+    static constexpr vk::Format RayTracingOutputFormat = vk::Format::eR16G16B16A16Sfloat;
 
     // Intended for use when setting up Vulkan validation layers in instance creation.
     std::vector<char const*> m_ValidationLayers = {

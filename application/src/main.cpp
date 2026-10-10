@@ -68,6 +68,16 @@ void SetLogLevelFromEnvironment()
     }
 }
 
+// MOMO_RENDER_MODE=raytraced starts in ray traced mode (P toggles at runtime)
+Momo::Renderer::RenderMode GetRenderModeFromEnvironment()
+{
+    const char* modeStr = std::getenv("MOMO_RENDER_MODE");
+    if (modeStr && strcmp(modeStr, "raytraced") == 0) {
+        return Momo::Renderer::RenderMode::RayTraced;
+    }
+    return Momo::Renderer::RenderMode::Raster;
+}
+
 int main(int argc, char** argv)
 {
     // Read command-line arguments (if any)
@@ -82,6 +92,7 @@ int main(int argc, char** argv)
     appSpec.Name = "Hyperbolic Time Chamber v0.1";
     appSpec.WindowSpec.Width = 1920;
     appSpec.WindowSpec.Height = 1080;
+    appSpec.InitialRenderMode = GetRenderModeFromEnvironment();
 
     Momo::Application app(appSpec);
     app.PushLayer<AppLayer>();

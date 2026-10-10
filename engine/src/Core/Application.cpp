@@ -13,6 +13,7 @@ namespace Momo
 {
     Application::Application(const ApplicationSpecification& spec)
         : m_Spec(spec),
+          m_RenderMode(spec.InitialRenderMode),
           m_MeshCache(m_AssetRegistry, {m_Renderer, nullptr}), // Mesh cache has no further dependencies
           m_TextureCache(m_AssetRegistry, {m_Renderer, nullptr}), // Texture cache has no further dependencies
           m_MaterialCache(m_AssetRegistry,  {m_Renderer, &m_TextureCache})
@@ -55,16 +56,42 @@ namespace Momo
         }
         Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
         m_ActiveScene->AddModel(handle);
-
-        Profiling::Timer bvhTimer;
-        bvhTimer.Start();
-        m_RayTracingGeometry = RayTracing::BuildSceneGeometry(m_AssetRegistry, handle);
-        bvhTimer.End();
-        const RayTracing::BvhStats& bvhStats = m_RayTracingGeometry->bvh.stats;
-        LOG_INFO("Momo", "Built BVH over {} triangles in {:.1f} ms: {} nodes, {} leaves, depth {}, max leaf {} triangles, SAH cost {:.1f}",
-                 m_RayTracingGeometry->positions.size(), bvhTimer.GetElapsedTimeInMs(), bvhStats.nodeCount, bvhStats.leafCount,
-                 bvhStats.maxDepth, bvhStats.maxLeafTriangles, bvhStats.sahCost);
+        StartRayTracingGeometryBuild();
         m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
+    }
+
+    // The BVH build takes seconds in debug builds. Running it on the main
+    // thread before the first frame kept the window from processing events
+    // long enough for the window manager to flag it as not responding.
+    void Application::StartRayTracingGeometryBuild()
+    {
+        // The scene is copied (it's a list of handles), so the worker never
+        // touches m_ActiveScene
+        m_PendingRayTracingGeometry = std::async(std::launch::async,
+            [&registry = m_AssetRegistry, scene = *m_ActiveScene]
+            {
+                Profiling::Timer bvhTimer;
+                bvhTimer.Start();
+                RayTracing::SceneGeometry geometry = RayTracing::BuildSceneGeometry(registry, scene);
+                bvhTimer.End();
+                const RayTracing::BvhStats& bvhStats = geometry.bvh.stats;
+                LOG_INFO("Momo", "Built BVH over {} triangles in {:.1f} ms: {} nodes, {} leaves, depth {}, max leaf {} triangles, SAH cost {:.1f}",
+                         geometry.positions.size(), bvhTimer.GetElapsedTimeInMs(), bvhStats.nodeCount, bvhStats.leafCount,
+                         bvhStats.maxDepth, bvhStats.maxLeafTriangles, bvhStats.sahCost);
+                return geometry;
+            });
+    }
+
+    // Called once per frame. Vulkan work stays on the main thread; only the CPU build runs on the worker.
+    void Application::UploadRayTracingGeometryIfReady()
+    {
+        if (!m_PendingRayTracingGeometry.valid() ||
+            m_PendingRayTracingGeometry.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            return;
+        }
+        // get() rethrows anything the build threw. The renderer keeps only the GPU copy
+        m_Renderer.UploadRayTracingScene(m_PendingRayTracingGeometry.get());
     }
 
     void Application::Run()
@@ -92,6 +119,26 @@ namespace Momo
                 m_Running = false;
                 break;
             }
+
+            UploadRayTracingGeometryIfReady();
+
+            bool toggleRenderMode = m_InputState.keys.IsKeyPressed(Input::Key::P);
+            if (toggleRenderMode && !m_ToggleRenderModeHeld)
+            {
+                if (m_RenderMode == Renderer::RenderMode::Raster && !m_Renderer.IsRayTracingAvailable())
+                {
+                    if (m_PendingRayTracingGeometry.valid())
+                        LOG_INFO("Momo", "Ray tracing geometry is still building; staying in raster mode.");
+                    else
+                        LOG_WARN("Momo", "Ray tracing is unavailable; staying in raster mode.");
+                }
+                else
+                {
+                    m_RenderMode = m_RenderMode == Renderer::RenderMode::Raster ? Renderer::RenderMode::RayTraced : Renderer::RenderMode::Raster;
+                    LOG_INFO("Momo", "Render mode: {}", m_RenderMode == Renderer::RenderMode::RayTraced ? "ray traced" : "raster");
+                }
+            }
+            m_ToggleRenderModeHeld = toggleRenderMode;
 
             updateTimer.Start();
             for (auto& layer : m_Layers)
@@ -151,7 +198,7 @@ namespace Momo
         glm::mat4 modelMatrix = glm::mat4(1.0f); // Identity for now, should be replaced with actual entity transform
         LOG_TRACE("Momo", "Model matrix: {}", glm::to_string(modelMatrix));
 
-        Renderer::DrawFrameTime renderFrameTime = m_Renderer.RenderFrame(vulkanModelData, m_Camera->GetViewMatrix(), modelMatrix);
+        Renderer::DrawFrameTime renderFrameTime = m_Renderer.RenderFrame(vulkanModelData, m_Camera->GetViewMatrix(), modelMatrix, m_RenderMode);
         return renderFrameTime;
     }
 
