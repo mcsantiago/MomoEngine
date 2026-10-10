@@ -54,7 +54,9 @@ struct PushConstants {
     float4   cameraPosition;        // w unused
     uint     frameIndex;            // Seeds the random numbers; changes every frame
     uint     sampleCount;           // Samples in the average including this one; 1 = start over
-    uint2    padding;
+    uint     maxBounces;            // Bounces after the camera ray hits a surface; each adds
+                                    // a closest-hit ray and a shadow ray per pixel
+    uint     padding;
 };
 [vk::push_constant] ConstantBuffer<PushConstants> pc;
 
@@ -63,9 +65,6 @@ struct PushConstants {
 static const float3 lightDir = normalize(float3(0.5, 1.0, 0.3));
 static const float3 SunIrradiance = float3(1.0, 0.95, 0.85) * 8.0;
 static const float Pi = 3.14159265;
-// Bounces after the camera ray hits a surface. Each one adds a closest-hit
-// ray and a shadow ray per pixel.
-static const uint MaxBounces = 5;
 // Scales the light before tonemapping; higher is brighter
 static const float Exposure = 1.0;
 static const float Infinity = asfloat(0x7f800000);
@@ -339,7 +338,7 @@ float3 TracePath(Ray ray, inout uint rngState)
     float3 radiance = float3(0.0);
     float3 throughput = float3(1.0);
 
-    for (uint bounce = 0; bounce <= MaxBounces; bounce++)
+    for (uint bounce = 0; bounce <= pc.maxBounces; bounce++)
     {
         Hit hit;
         if (!IntersectScene(ray, 0.0, Infinity, false, hit))
@@ -350,7 +349,7 @@ float3 TracePath(Ray ray, inout uint rngState)
 
         Surface surface = GetSurface(ray, hit);
         radiance += throughput * DirectSunlight(surface);
-        if (bounce == MaxBounces)
+        if (bounce == pc.maxBounces)
             break;
 
         ray.direction = RandomCosineDirection(surface.normal, rngState);

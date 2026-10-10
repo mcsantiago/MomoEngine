@@ -1,6 +1,8 @@
 # Build the engine as a static lib
 add_library(MomoEngine STATIC
   src/Core/Application.cpp
+  src/Core/Benchmark.cpp
+  include/Momo/Core/Benchmark.h
   src/Logging/Logger.cpp
   src/Platform/GLFW/GLFWWindow.cpp
   src/Platform/GLFW/WindowVulkan.cpp

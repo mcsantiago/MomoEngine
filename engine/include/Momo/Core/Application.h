@@ -11,6 +11,7 @@
 #include "Momo/Assets/AssetRegistry.h"
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Core/Scene.h"
+#include "Momo/Core/Benchmark.h"
 
 
 namespace Momo
@@ -20,6 +21,8 @@ namespace Momo
         std::string Name = "Untitled";
         WindowSpecification WindowSpec{};
         Renderer::RenderMode InitialRenderMode = Renderer::RenderMode::Raster; // Toggled at runtime with P
+        // Set to run the ray tracing benchmark instead of interactive mode; the app exits when done
+        std::optional<BenchmarkSpecification> Benchmark;
     };
 
     class Layer
@@ -79,6 +82,8 @@ namespace Momo
         // m_AssetRegistry, so the registry must not be modified while this is
         // valid. Declared after the registry so it is destroyed (and waited on) first.
         std::future<RayTracing::SceneGeometry> m_PendingRayTracingGeometry;
+
+        std::optional<Benchmark> m_Benchmark;
 
         Renderer::VulkanModelData LoadMesh(const std::filesystem::path &path);
         std::optional<Renderer::DrawFrameTime> Draw(float dt);

@@ -78,6 +78,16 @@ Momo::Renderer::RenderMode GetRenderModeFromEnvironment()
     return Momo::Renderer::RenderMode::Raster;
 }
 
+// MOMO_BENCHMARK=<results.json> runs the ray tracing benchmark and exits
+std::optional<Momo::BenchmarkSpecification> GetBenchmarkFromEnvironment()
+{
+    const char* outputPath = std::getenv("MOMO_BENCHMARK");
+    if (!outputPath || outputPath[0] == '\0') {
+        return std::nullopt;
+    }
+    return Momo::BenchmarkSpecification{ .OutputPath = outputPath };
+}
+
 int main(int argc, char** argv)
 {
     // Read command-line arguments (if any)
@@ -93,6 +103,7 @@ int main(int argc, char** argv)
     appSpec.WindowSpec.Width = 1920;
     appSpec.WindowSpec.Height = 1080;
     appSpec.InitialRenderMode = GetRenderModeFromEnvironment();
+    appSpec.Benchmark = GetBenchmarkFromEnvironment();
 
     Momo::Application app(appSpec);
     app.PushLayer<AppLayer>();

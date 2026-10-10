@@ -243,7 +243,7 @@ namespace Renderer {
         }
         vk::QueryPoolCreateInfo queryPoolInfo{};
         queryPoolInfo.queryType = vk::QueryType::eTimestamp;
-        queryPoolInfo.queryCount = 2 * MAX_FRAMES_IN_FLIGHT; // Start and end timestamps for each frame in flight
+        queryPoolInfo.queryCount = QUERIES_PER_FRAME * MAX_FRAMES_IN_FLIGHT;
         m_TimestampQueryPool = vk::raii::QueryPool(*m_Device, queryPoolInfo);
         LOG_DEBUG("VulkanRenderer", "Created timestamp query pool with {} queries.", queryPoolInfo.queryCount);
     }
@@ -348,8 +348,8 @@ namespace Renderer {
         m_CommandBuffers[m_CurrentFrame].begin({});
 
         if (m_GpuTimingEnabled) {
-            uint32_t firstQuery = m_CurrentFrame * 2;
-            m_CommandBuffers[m_CurrentFrame].resetQueryPool(**m_TimestampQueryPool, firstQuery, 2);
+            uint32_t firstQuery = m_CurrentFrame * QUERIES_PER_FRAME;
+            m_CommandBuffers[m_CurrentFrame].resetQueryPool(**m_TimestampQueryPool, firstQuery, QUERIES_PER_FRAME);
             m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, **m_TimestampQueryPool, firstQuery);
         }
     }
@@ -491,7 +491,7 @@ namespace Renderer {
 
         m_CommandBuffers[m_CurrentFrame].pipelineBarrier2(presentDependency);
         if (m_GpuTimingEnabled) {
-            m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, **m_TimestampQueryPool, m_CurrentFrame * 2 + 1);
+            m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, **m_TimestampQueryPool, m_CurrentFrame * QUERIES_PER_FRAME + 1);
         }
         m_CommandBuffers[m_CurrentFrame].end();
         m_RecordTimer.End();
@@ -509,6 +509,7 @@ namespace Renderer {
         m_GraphicsQueue->submit(submitInfo, *m_InFlightFences[m_CurrentFrame]);
         if (m_GpuTimingEnabled) {
             m_HasTimestampQueryPoolResults[m_CurrentFrame] = true;
+            m_HasRayTracingTimestamps[m_CurrentFrame] = mode == RenderMode::RayTraced;
         }
 
         // The submit is done, so move to the next frame's resources even if present fails below
@@ -554,16 +555,22 @@ namespace Renderer {
             }
             // Get the timestamps written the last time this frame slot was used, if GPU timing is enabled
             if (m_GpuTimingEnabled && m_HasTimestampQueryPoolResults[m_CurrentFrame]) {
+                // Only read the dispatch pair if that frame wrote it: waiting on
+                // queries that were reset but never written would never return
+                uint32_t queryCount = m_HasRayTracingTimestamps[m_CurrentFrame] ? 4 : 2;
                 auto [result, ticks] = m_TimestampQueryPool->getResults<uint64_t>(
-                m_CurrentFrame * 2,         // firstQuery: this frame slot's start timestamp
-                2,                          // queryCount: read the start and end timestamps
-                2 * sizeof(uint64_t),       // dataSize: total bytes for the whole output (16)
-                sizeof(uint64_t),           // stride: bytes from one result to the next (8)
+                m_CurrentFrame * QUERIES_PER_FRAME, // firstQuery: this frame slot's first timestamp
+                queryCount,                         // queryCount
+                queryCount * sizeof(uint64_t),      // dataSize: total bytes for the whole output
+                sizeof(uint64_t),                   // stride: bytes from one result to the next (8)
                 vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
 
                 if (result == vk::Result::eSuccess) {
-                    uint64_t elapsedTicks = (ticks[1] - ticks[0]) & m_TimestampValidBitmask;
-                    m_LastGpuFrameMs = elapsedTicks * m_TimestampPeriodNs / 1'000'000.0f;
+                    auto ticksToMs = [this](uint64_t start, uint64_t end) {
+                        return ((end - start) & m_TimestampValidBitmask) * m_TimestampPeriodNs / 1'000'000.0;
+                    };
+                    m_LastGpuFrameMs = ticksToMs(ticks[0], ticks[1]);
+                    m_LastRayTracingMs = queryCount == 4 ? std::optional(ticksToMs(ticks[2], ticks[3])) : std::nullopt;
                     LOG_TRACE("VulkanRenderer", "GPU frame time: {} ms", m_LastGpuFrameMs);
                 }
             }
@@ -577,6 +584,8 @@ namespace Renderer {
 
             EndFrame(imageIndex, mode);
             frameTime.gpuFrameMs = m_LastGpuFrameMs;
+            frameTime.hasRayTracingMs = m_LastRayTracingMs.has_value();
+            frameTime.rayTracingMs = m_LastRayTracingMs.value_or(0.0);
             frameTime.fenceWaitMs = m_FenceWaitTimer.GetElapsedTimeInMs();
             frameTime.recordMs = m_RecordTimer.GetElapsedTimeInMs();
             frameTime.submitMs = m_SubmitTimer.GetElapsedTimeInMs();

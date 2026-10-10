@@ -1,6 +1,7 @@
 #pragma once
 #include <vulkan/vulkan_raii.hpp>
 #include <vector>
+#include <string>
 #include <array>
 #include <optional>
 #include <cstdint>
@@ -19,6 +20,12 @@ namespace Renderer {
 struct DrawFrameTime
 {
     float recordMs, submitMs, fenceWaitMs, gpuFrameMs;
+    // GPU time of the ray tracing dispatch alone. GPU times arrive
+    // MAX_FRAMES_IN_FLIGHT frames late (read back when the frame slot comes
+    // round again), so this describes an earlier frame; false if that frame
+    // wasn't ray traced.
+    bool  hasRayTracingMs;
+    float rayTracingMs;
 };
 
 enum class RenderMode
@@ -34,7 +41,8 @@ struct RayTracingPushConstants
     glm::vec4 cameraPosition;        // w unused
     uint32_t  frameIndex;            // Changes every ray traced frame; seeds the random numbers
     uint32_t  sampleCount;           // Samples in the running average including this frame; 1 = start over
-    uint32_t  padding[2] = { 0, 0 };
+    uint32_t  maxBounces;            // Bounces after the camera ray's first hit
+    uint32_t  padding = 0;
 };
 static_assert(sizeof(RayTracingPushConstants) == 96, "RayTracingPushConstants must match raytrace.slang");
 
@@ -52,6 +60,8 @@ class VulkanRenderer
 {
 public:
     static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+    // Timestamp queries per frame slot: frame start/end, ray tracing dispatch start/end
+    static constexpr uint32_t QUERIES_PER_FRAME = 4;
 
     void Init(const IWindow& window);
     void Shutdown();
@@ -63,6 +73,11 @@ public:
     void UploadRayTracingScene(RayTracing::SceneGeometry geometry, std::vector<vk::ImageView> textureViews);
     // False if the device can't present a ray traced image or no scene was uploaded
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
+    uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
+
+    // For benchmark reports
+    std::string GetDeviceName() const { return m_PhysicalDevice->getProperties().deviceName.data(); }
+    vk::Extent2D GetSwapchainExtent() const { return m_SwapchainExtent; }
 
     AllocatedBuffer     CreateVertexBuffer(const std::vector<Momo::Geometry::Vertex>& vertices);
     AllocatedBuffer     CreateIndexBuffer(const std::vector<uint32_t>& indices);
@@ -150,8 +165,10 @@ private:
     uint32_t m_CurrentFrame = 0;
 
     std::array<bool, MAX_FRAMES_IN_FLIGHT> m_HasTimestampQueryPoolResults{};
+    std::array<bool, MAX_FRAMES_IN_FLIGHT> m_HasRayTracingTimestamps{}; // The slot's last frame wrote the dispatch pair
     uint64_t m_TimestampValidBitmask = 0;
     double m_LastGpuFrameMs = 0;
+    std::optional<double> m_LastRayTracingMs;
     float m_TimestampPeriodNs = 0.0f;   // nanoseconds per timestamp tick
     bool  m_GpuTimingEnabled = false;   // false = skip every timestamp call later
     uint32_t m_GraphicsQueueFamilyIdx = 0;
@@ -187,6 +204,7 @@ private:
     static constexpr vk::Format RayTracingAccumulationFormat = vk::Format::eR32G32B32A32Sfloat;
     uint32_t m_AccumulatedSamples = 0; // 0 = the next frame starts a new average
     uint32_t m_RayTracingFrameIndex = 0;
+    uint32_t m_RayTracingMaxBounces = 5;
     glm::mat4 m_AccumulationViewProjection{ 0.0f }; // Camera the running average was made with
 
     // Intended for use when setting up Vulkan validation layers in instance creation.

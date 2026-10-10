@@ -304,12 +304,22 @@ namespace Renderer {
             .cameraPosition = glm::vec4(cameraPosition, 1.0f),
             .frameIndex = m_RayTracingFrameIndex++,
             .sampleCount = m_AccumulatedSamples,
+            .maxBounces = m_RayTracingMaxBounces,
         };
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **m_RayTracingPipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **m_RayTracingPipelineLayout, 0, m_RayTracingDescriptorSet, nullptr);
         commandBuffer.pushConstants<RayTracingPushConstants>(**m_RayTracingPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, pushConstants);
+        // Time the dispatch alone, for benchmarks. Each timestamp is written once
+        // all earlier compute work in this command buffer has finished.
+        uint32_t firstQuery = m_CurrentFrame * QUERIES_PER_FRAME;
+        if (m_GpuTimingEnabled) {
+            commandBuffer.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, **m_TimestampQueryPool, firstQuery + 2);
+        }
         // 8x8 threads per group, matching [numthreads] in raytrace.slang
         commandBuffer.dispatch((m_SwapchainExtent.width + 7) / 8, (m_SwapchainExtent.height + 7) / 8, 1);
+        if (m_GpuTimingEnabled) {
+            commandBuffer.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, **m_TimestampQueryPool, firstQuery + 3);
+        }
 
         // Output: shader writes -> blit reads
         vk::ImageMemoryBarrier2 toTransferSrc{};

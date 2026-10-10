@@ -19,6 +19,11 @@ namespace Momo
           m_MaterialCache(m_AssetRegistry,  {m_Renderer, &m_TextureCache})
     {
         LOG_INFO("Momo", "Starting '{}' ({}x{})", m_Spec.Name, m_Spec.WindowSpec.Width, m_Spec.WindowSpec.Height);
+        if (m_Spec.Benchmark)
+        {
+            m_Benchmark.emplace(*m_Spec.Benchmark);
+            m_RenderMode = Renderer::RenderMode::RayTraced;
+        }
         m_Window = std::unique_ptr<IWindow>(IWindow::Create(m_Spec.WindowSpec));
         m_Renderer.Init(*m_Window);
         m_ModelLoader = std::unique_ptr<Assets::IModelLoader>(Assets::IModelLoader::CreateGltfModelLoader());
@@ -131,7 +136,7 @@ namespace Momo
             UploadRayTracingGeometryIfReady();
 
             bool toggleRenderMode = m_InputState.keys.IsKeyPressed(Input::Key::P);
-            if (toggleRenderMode && !m_ToggleRenderModeHeld)
+            if (toggleRenderMode && !m_ToggleRenderModeHeld && !m_Benchmark)
             {
                 if (m_RenderMode == Renderer::RenderMode::Raster && !m_Renderer.IsRayTracingAvailable())
                 {
@@ -152,10 +157,31 @@ namespace Momo
             for (auto& layer : m_Layers)
                 layer->OnUpdate(dt);
 
-            m_Camera->OnUpdate(dt, m_InputState);
+            // Benchmarks place the camera themselves and ignore input
+            if (!m_Benchmark)
+                m_Camera->OnUpdate(dt, m_InputState);
+            else if (!m_Benchmark->IsFinished())
+                m_Camera->SetPose(m_Benchmark->CurrentView().Position, m_Benchmark->CurrentView().Yaw, m_Benchmark->CurrentView().Pitch);
             updateTimer.End();
 
             auto drawFrameTime = Draw(dt);
+
+            // Frames before the ray tracing geometry is uploaded render raster and don't count
+            if (m_Benchmark && drawFrameTime.has_value() && m_Renderer.IsRayTracingAvailable())
+            {
+                m_Benchmark->Record(*drawFrameTime);
+                if (m_Benchmark->IsFinished())
+                {
+                    vk::Extent2D extent = m_Renderer.GetSwapchainExtent();
+                    m_Benchmark->WriteResults({
+                        .Gpu = m_Renderer.GetDeviceName(),
+                        .Width = extent.width,
+                        .Height = extent.height,
+                        .Bounces = m_Renderer.GetRayTracingMaxBounces(),
+                    });
+                    m_Running = false;
+                }
+            }
 
             frameStats.frame        = m_FrameCount;
             frameStats.cpuTotalMs   = std::chrono::duration<float, std::milli>(clock::now() - now).count();

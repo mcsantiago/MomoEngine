@@ -33,6 +33,13 @@ void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
     UpdateCameraVectors(deltaX, deltaY);
 }
 
+void Camera::SetPose(glm::vec3 position, float yaw, float pitch) {
+    m_Position = position;
+    m_Yaw = yaw;
+    m_Pitch = pitch;
+    UpdateCameraVectors(0, 0);
+}
+
 glm::mat4 Camera::GetViewMatrix() const {
     return glm::lookAt(m_Position, m_Position + m_Front, m_Up);
 }

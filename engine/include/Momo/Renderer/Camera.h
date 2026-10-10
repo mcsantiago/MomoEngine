@@ -10,6 +10,8 @@ public:
 
     glm::mat4 GetViewMatrix() const;
     void OnUpdate(float deltaTime, const Input::InputState& inputState);
+    // Places the camera directly (yaw and pitch in degrees), e.g. for benchmark views
+    void SetPose(glm::vec3 position, float yaw, float pitch);
 
 private:
     void UpdateCameraVectors(int deltaX, int deltaY);
