@@ -140,7 +140,9 @@ bool PassesAlphaTest(uint triangleIndex, Hit hit)
     return SampleBaseColor(material, InterpolateUV(triangle, hit)).a >= material.alphaCutoff;
 }
 
-bool IntersectScene(Ray ray, float tMin, float tMax, out Hit closest)
+// Finds the closest hit in (tMin, tMax). With anyHit, returns at the first
+// hit found instead, which is all a shadow ray needs to know.
+bool IntersectScene(Ray ray, float tMin, float tMax, bool anyHit, out Hit closest)
 {
     closest = {};
     bool found = false;
@@ -169,6 +171,8 @@ bool IntersectScene(Ray ray, float tMin, float tMax, out Hit closest)
                     closest.triangle = i;
                     tMax = hit.t;
                     found = true;
+                    if (anyHit)
+                        return true;
                 }
             }
         }
@@ -206,6 +210,27 @@ float3 Sky(float3 direction)
     return lerp(float3(0.35, 0.35, 0.4), float3(0.55, 0.7, 0.95), height);
 }
 
+// True if nothing blocks the way from origin toward the (infinitely far) sun
+bool SeesSun(float3 origin)
+{
+    Ray shadowRay;
+    shadowRay.origin = origin;
+    shadowRay.direction = lightDir;
+    Hit unused;
+    return !IntersectScene(shadowRay, 0.0, Infinity, true, unused);
+}
+
+// Floating-point error puts a computed hit point slightly above or below the
+// surface, so a ray started exactly there can hit its own triangle ("shadow
+// acne"). Start it a little off the surface instead, on the side given by
+// normal. The offset grows with distance from the origin because float
+// precision shrinks there.
+float3 OffsetFromSurface(float3 position, float3 normal)
+{
+    float scale = max(1.0, max(abs(position.x), max(abs(position.y), abs(position.z))));
+    return position + normal * (1e-4 * scale);
+}
+
 float3 Shade(Ray ray, Hit hit)
 {
     TriangleShading triangle = shading[hit.triangle];
@@ -215,9 +240,22 @@ float3 Shade(Ray ray, Hit hit)
     if (dot(normal, ray.direction) > 0.0)
         normal = -normal;
 
+    // The offset uses the true (flat) triangle normal: the interpolated one
+    // can tilt into the surface near silhouettes
+    TrianglePositions positions = triangles[hit.triangle];
+    float3 faceNormal = normalize(cross(positions.v1.xyz - positions.v0.xyz, positions.v2.xyz - positions.v0.xyz));
+    if (dot(faceNormal, ray.direction) > 0.0)
+        faceNormal = -faceNormal;
+    float3 position = ray.origin + ray.direction * hit.t;
+
     Material material = materials[triangle.materialIndex];
     float3 baseColor = SampleBaseColor(material, InterpolateUV(triangle, hit)).rgb;
     float diffuse = max(dot(normal, lightDir), 0.0);
+    // A triangle whose flat side faces away from the sun shadows itself, even
+    // if its smoothed normal still leans toward the sun. Otherwise trace a
+    // shadow ray, but only if there's direct light to lose.
+    if (diffuse > 0.0 && (dot(faceNormal, lightDir) <= 0.0 || !SeesSun(OffsetFromSurface(position, faceNormal))))
+        diffuse = 0.0;
     return baseColor * (0.15 + 0.85 * diffuse);
 }
 
@@ -240,6 +278,6 @@ void compMain(uint3 threadId : SV_DispatchThreadID)
     ray.direction = normalize(mul(pc.inverseView, float4(target.xyz / target.w, 0.0)).xyz);
 
     Hit hit;
-    float3 color = IntersectScene(ray, 0.0, Infinity, hit) ? Shade(ray, hit) : Sky(ray.direction);
+    float3 color = IntersectScene(ray, 0.0, Infinity, false, hit) ? Shade(ray, hit) : Sky(ray.direction);
     outputImage[threadId.xy] = float4(color, 1.0);
 }
