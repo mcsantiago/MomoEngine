@@ -25,6 +25,10 @@ add_library(MomoEngine STATIC
   include/Momo/Cache/DataCache.h
   include/Momo/Cache/DataCache.h
   include/Momo/Core/Scene.h
+  include/Momo/RayTracing/Bvh.h
+  src/RayTracing/Bvh.cpp
+  include/Momo/RayTracing/SceneGeometry.h
+  src/RayTracing/SceneGeometry.cpp
 )
 
 # Public headers are under engine/include
@@ -193,6 +197,10 @@ add_custom_target(MomoShaders ALL
 add_dependencies(MomoEngine MomoShaders)
 
 # Install shaders to output directory (optional, for deployment)
+if (MOMO_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
+
 install(DIRECTORY ${SHADER_OUTPUT_DIR}/
   DESTINATION shaders
   FILES_MATCHING PATTERN "*.spv"

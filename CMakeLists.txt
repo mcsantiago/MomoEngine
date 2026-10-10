@@ -9,5 +9,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Generate compile_commands.json for clangd / nvim
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(MOMO_BUILD_TESTS "Build the engine unit tests" ON)
+if (MOMO_BUILD_TESTS)
+  enable_testing()
+endif()
+
 add_subdirectory(engine)
 add_subdirectory(application)

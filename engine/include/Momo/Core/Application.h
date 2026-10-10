@@ -10,6 +10,7 @@
 #include "Momo/Assets/AssetRegistry.h"
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Core/Scene.h"
+#include "Momo/RayTracing/SceneGeometry.h"
 
 
 namespace Momo
@@ -65,6 +66,7 @@ namespace Momo
         // Scene data
         std::optional<Scene> m_ActiveScene; 
         std::optional<Camera> m_Camera;
+        std::optional<RayTracing::SceneGeometry> m_RayTracingGeometry; // CPU-side; uploaded to the GPU in phase 2
         // std::optional<Renderer::VulkanModelData> m_Mesh; // TODO: Should be a full scene object as active scene
 
         Renderer::MeshGPUCache m_MeshCache;

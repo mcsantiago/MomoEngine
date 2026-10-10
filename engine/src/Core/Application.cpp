@@ -55,6 +55,15 @@ namespace Momo
         }
         Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
         m_ActiveScene->AddModel(handle);
+
+        Profiling::Timer bvhTimer;
+        bvhTimer.Start();
+        m_RayTracingGeometry = RayTracing::BuildSceneGeometry(m_AssetRegistry, handle);
+        bvhTimer.End();
+        const RayTracing::BvhStats& bvhStats = m_RayTracingGeometry->bvh.stats;
+        LOG_INFO("Momo", "Built BVH over {} triangles in {:.1f} ms: {} nodes, {} leaves, depth {}, max leaf {} triangles, SAH cost {:.1f}",
+                 m_RayTracingGeometry->positions.size(), bvhTimer.GetElapsedTimeInMs(), bvhStats.nodeCount, bvhStats.leafCount,
+                 bvhStats.maxDepth, bvhStats.maxLeafTriangles, bvhStats.sahCost);
         m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
     }
 
