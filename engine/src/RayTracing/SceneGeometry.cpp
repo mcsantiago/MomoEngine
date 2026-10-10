@@ -1,4 +1,5 @@
 #include "Momo/RayTracing/SceneGeometry.h"
+#include "Momo/Logging/Logger.h"
 
 #include <cmath>
 #include <unordered_map>
@@ -12,46 +13,69 @@ glm::vec3 NormalizeOr(const glm::vec3& normal, const glm::vec3& fallback)
     return lengthSquared > 0.0f ? normal / std::sqrt(lengthSquared) : fallback;
 }
 
-// Mirrors the raster path's MaterialParams (see MaterialGPUCache)
-RayTracingMaterial ToRayTracingMaterial(const Assets::AssetRegistry& registry, const Assets::Material& material)
-{
-    return RayTracingMaterial{
-        .baseColorFactor = material.baseColorFactor,
-        .alphaCutoff = material.alphaMode == Assets::AlphaMode::Mask ? material.alphaCutoff : -1.0f,
-        .baseColorTexture = registry.Resolve(material.baseColorTextureHandle).id,
-    };
-}
-
-// Maps registry material handles to indices in a compact table holding only
-// the materials the scene uses, in first-use order
+// Maps registry material and texture handles to indices in compact tables
+// holding only what the scene uses, in first-use order. Texture slot 0 is
+// always the default white texture.
 class MaterialTable
 {
 public:
-    explicit MaterialTable(const Assets::AssetRegistry& registry) : m_Registry(registry) {}
+    explicit MaterialTable(const Assets::AssetRegistry& registry) : m_Registry(registry)
+    {
+        TextureIndexOf(m_Registry.Resolve(Assets::TextureHandle{}));
+    }
 
     uint32_t IndexOf(Assets::MaterialHandle handle)
     {
-        auto [it, inserted] = m_Indices.try_emplace(handle, static_cast<uint32_t>(m_Materials.size()));
+        auto [it, inserted] = m_MaterialIndices.try_emplace(handle, static_cast<uint32_t>(m_Materials.size()));
         if (inserted)
         {
-            m_Materials.push_back(handle.IsValid()
-                ? ToRayTracingMaterial(m_Registry, m_Registry.Get(handle))
-                : RayTracingMaterial{ .baseColorFactor = glm::vec4(1.0f), .alphaCutoff = -1.0f,
-                                      .baseColorTexture = m_Registry.Resolve(Assets::TextureHandle{}).id });
+            // Meshes without a material get an opaque white one
+            Assets::Material material{ .baseColorFactor = glm::vec4(1.0f) };
+            if (handle.IsValid())
+                material = m_Registry.Get(handle);
+
+            // Mirrors the raster path's MaterialParams (see MaterialGPUCache)
+            m_Materials.push_back(RayTracingMaterial{
+                .baseColorFactor = material.baseColorFactor,
+                .alphaCutoff = material.alphaMode == Assets::AlphaMode::Mask ? material.alphaCutoff : -1.0f,
+                .baseColorTexture = TextureIndexOf(m_Registry.Resolve(material.baseColorTextureHandle)),
+            });
         }
         return it->second;
     }
 
-    std::vector<RayTracingMaterial> Take() { return std::move(m_Materials); }
+    const RayTracingMaterial& Get(uint32_t index) const { return m_Materials[index]; }
+
+    std::vector<RayTracingMaterial> TakeMaterials() { return std::move(m_Materials); }
+    std::vector<Assets::TextureHandle> TakeTextures() { return std::move(m_Textures); }
 
 private:
+    uint32_t TextureIndexOf(Assets::TextureHandle handle)
+    {
+        auto it = m_TextureIndices.find(handle);
+        if (it != m_TextureIndices.end())
+            return it->second;
+
+        if (m_Textures.size() == MaxRayTracingTextures)
+        {
+            LOG_WARN("RayTracing", "Scene uses more than {} textures; texture {} falls back to white", MaxRayTracingTextures, handle.id);
+            return 0;
+        }
+        auto index = static_cast<uint32_t>(m_Textures.size());
+        m_Textures.push_back(handle);
+        m_TextureIndices.emplace(handle, index);
+        return index;
+    }
+
     const Assets::AssetRegistry& m_Registry;
-    std::unordered_map<Assets::MaterialHandle, uint32_t> m_Indices;
+    std::unordered_map<Assets::MaterialHandle, uint32_t> m_MaterialIndices;
     std::vector<RayTracingMaterial> m_Materials;
+    std::unordered_map<Assets::TextureHandle, uint32_t> m_TextureIndices;
+    std::vector<Assets::TextureHandle> m_Textures;
 };
 
 // Appends the mesh's triangles in world space
-void AppendMesh(const Assets::Mesh& mesh, uint32_t materialIndex,
+void AppendMesh(const Assets::Mesh& mesh, uint32_t materialIndex, bool alphaMasked,
                 std::vector<TrianglePositions>& positions, std::vector<TriangleShading>& shading)
 {
     const auto& vertices = mesh.meshData.vertices;
@@ -75,7 +99,7 @@ void AppendMesh(const Assets::Mesh& mesh, uint32_t materialIndex,
         glm::vec3 faceNormal = NormalizeOr(glm::cross(p1 - p0, p2 - p0), glm::vec3(0.0f, 1.0f, 0.0f));
 
         positions.push_back(TrianglePositions{
-            .v0 = glm::vec4(p0, 0.0f),
+            .v0 = glm::vec4(p0, alphaMasked ? 1.0f : 0.0f),
             .v1 = glm::vec4(p1, 0.0f),
             .v2 = glm::vec4(p2, 0.0f),
         });
@@ -103,7 +127,9 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
         for (const Assets::MeshHandle& meshHandle : registry.Get(model).meshes)
         {
             const Assets::Mesh& mesh = registry.Get(meshHandle);
-            AppendMesh(mesh, materials.IndexOf(mesh.materialHandle), positions, shading);
+            uint32_t materialIndex = materials.IndexOf(mesh.materialHandle);
+            bool alphaMasked = materials.Get(materialIndex).alphaCutoff >= 0.0f;
+            AppendMesh(mesh, materialIndex, alphaMasked, positions, shading);
         }
     }
 
@@ -111,7 +137,8 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
     geometry.bvh = BuildBvh(positions, settings);
     geometry.positions = Reorder<TrianglePositions>(positions, geometry.bvh.triangleOrder);
     geometry.shading = Reorder<TriangleShading>(shading, geometry.bvh.triangleOrder);
-    geometry.materials = materials.Take();
+    geometry.materials = materials.TakeMaterials();
+    geometry.textures = materials.TakeTextures();
     return geometry;
 }
 

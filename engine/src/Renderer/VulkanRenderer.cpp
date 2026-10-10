@@ -205,7 +205,14 @@ namespace Renderer {
         CreateSyncObjects();
         LOG_DEBUG("VulkanRenderer", "Creating texture sampler...");
         CreateTextureSampler();
-        m_DescriptorAllocator.Init(*m_Device, std::nullopt);
+        // One set per material: a base color texture and a parameters UBO
+        m_DescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
+            .maxSets = 32,
+            .sizes = {
+                { vk::DescriptorType::eCombinedImageSampler, 32 },
+                { vk::DescriptorType::eUniformBuffer, 32 },
+            },
+        });
     }
 
     void VulkanRenderer::CheckTimestampSupport()
@@ -293,6 +300,7 @@ namespace Renderer {
         // This also implicitly destroys the VkPhysicalDevice so no need to set it here
         m_Device->waitIdle();
         m_DescriptorAllocator.Destroy();
+        m_RayTracingDescriptorAllocator.Destroy();
     }
 
     vk::raii::CommandBuffer VulkanRenderer::BeginSingleUseCommandBuffer()
@@ -1210,6 +1218,7 @@ namespace Renderer {
         // Query supported Vulkan 1.3 features from the physical device
         auto supportedFeatures = m_PhysicalDevice->getFeatures2<
             vk::PhysicalDeviceFeatures2,
+            vk::PhysicalDeviceVulkan12Features,
             vk::PhysicalDeviceVulkan13Features,
             vk::PhysicalDeviceDynamicRenderingFeatures
         >();
@@ -1225,10 +1234,17 @@ namespace Renderer {
         vk::PhysicalDeviceVulkan11Features vulkan11Features{};
         vulkan11Features.shaderDrawParameters = VK_TRUE;
 
+        // Optional: lets the ray tracing shader index its texture array with a
+        // different index per pixel. Without it, ray tracing is disabled.
+        vk::PhysicalDeviceVulkan12Features vulkan12Features{};
+        m_SupportsNonUniformTextureIndexing = supportedFeatures.get<vk::PhysicalDeviceVulkan12Features>().shaderSampledImageArrayNonUniformIndexing;
+        vulkan12Features.shaderSampledImageArrayNonUniformIndexing = m_SupportsNonUniformTextureIndexing;
+        vulkan12Features.pNext = &vulkan11Features;
+
         vk::PhysicalDeviceVulkan13Features vulkan13Features{};
         vulkan13Features.dynamicRendering = VK_TRUE;
         vulkan13Features.synchronization2 = VK_TRUE;
-        vulkan13Features.pNext = &vulkan11Features;
+        vulkan13Features.pNext = &vulkan12Features;
 
         vk::PhysicalDeviceFeatures2 features2{};
         features2.pNext = &vulkan13Features;

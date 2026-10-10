@@ -29,7 +29,7 @@ static_assert(sizeof(BvhNode) == 32, "BvhNode must match the std430 layout in th
 // World-space triangle positions, the only data traversal touches. Kept apart
 // from shading data so the hot loop reads 48 bytes per candidate triangle.
 struct TrianglePositions {
-    glm::vec4 v0; // w unused
+    glm::vec4 v0; // w: 1 if the triangle's material is alpha masked (ignored by the BVH build and CPU traversal)
     glm::vec4 v1; // w unused
     glm::vec4 v2; // w unused
 };

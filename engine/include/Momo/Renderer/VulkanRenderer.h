@@ -55,8 +55,9 @@ public:
     DrawFrameTime RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix, RenderMode mode);
 
     // Uploads the scene's ray tracing geometry and keeps only the GPU copy.
-    // Replaces any previously uploaded scene.
-    void UploadRayTracingScene(RayTracing::SceneGeometry geometry);
+    // textureViews[i] is the GPU image of geometry.textures[i]; the caller keeps
+    // the images alive while the scene is in use. Replaces any previous scene.
+    void UploadRayTracingScene(RayTracing::SceneGeometry geometry, std::vector<vk::ImageView> textureViews);
     // False if the device can't present a ray traced image or no scene was uploaded
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
 
@@ -165,11 +166,14 @@ private:
 
     // Ray tracing resources
     bool m_RayTracingSupported = false;
+    bool m_SupportsNonUniformTextureIndexing = false; // Set at device creation
     std::optional<RayTracingSceneBuffers> m_RayTracingScene;
     std::optional<vk::raii::DescriptorSetLayout> m_RayTracingSetLayout;
     std::optional<vk::raii::PipelineLayout> m_RayTracingPipelineLayout;
     std::optional<vk::raii::Pipeline> m_RayTracingPipeline;
+    DescriptorAllocator m_RayTracingDescriptorAllocator;
     vk::DescriptorSet m_RayTracingDescriptorSet; // Allocated on first upload
+    std::vector<vk::ImageView> m_RayTracingTextureViews; // Owned by the caller's texture cache
     // Shared by all frames in flight, like the depth buffer; sized to the swapchain
     std::optional<AllocatedImage> m_RayTracingOutput;
     static constexpr vk::Format RayTracingOutputFormat = vk::Format::eR16G16B16A16Sfloat;

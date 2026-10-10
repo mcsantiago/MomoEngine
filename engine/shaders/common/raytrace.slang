@@ -1,7 +1,8 @@
 // Primary-ray ray tracer: one thread per pixel builds a camera ray, finds the
 // closest hit by traversing the scene BVH, and shades it. Traversal and the
 // intersection tests mirror the CPU reference in engine/src/RayTracing/Bvh.cpp;
-// keep the two in sync.
+// keep the two in sync. One deliberate difference: the shader also runs the
+// alpha test for masked materials, which the CPU reference (no textures) skips.
 
 // Layouts match engine/include/Momo/RayTracing/{Bvh,SceneGeometry}.h (std430)
 struct BvhNode {
@@ -12,7 +13,7 @@ struct BvhNode {
 };
 
 struct TrianglePositions {
-    float4 v0;
+    float4 v0;    // w: 1 if the triangle's material is alpha masked
     float4 v1;
     float4 v2;
 };
@@ -30,8 +31,8 @@ struct TriangleShading {
 
 struct Material {
     float4 baseColorFactor;
-    float  alphaCutoff;
-    uint   baseColorTexture;
+    float  alphaCutoff;      // -1 unless the material is alpha masked
+    uint   baseColorTexture; // Index into baseColorTextures
     uint2  padding;
 };
 
@@ -40,6 +41,9 @@ struct Material {
 [vk::binding(2, 0)] StructuredBuffer<TriangleShading> shading;
 [vk::binding(3, 0)] StructuredBuffer<Material> materials;
 [vk::binding(4, 0)] [format("rgba16f")] RWTexture2D<float4> outputImage;
+// Must match RayTracing::MaxRayTracingTextures. Unused slots hold a white texture.
+static const uint MaxTextures = 256;
+[vk::binding(5, 0)] Sampler2D baseColorTextures[MaxTextures];
 
 struct PushConstants {
     float4x4 inverseView;
@@ -114,6 +118,28 @@ float IntersectAabb(Ray ray, float3 inverseDirection, BvhNode node, float tMin, 
     return tEnter <= tExit ? tEnter : Infinity;
 }
 
+float2 InterpolateUV(TriangleShading triangle, Hit hit)
+{
+    return triangle.uv0 * (1.0 - hit.u - hit.v) + triangle.uv1 * hit.u + triangle.uv2 * hit.v;
+}
+
+// Neighboring pixels can hit different materials, so the texture index must
+// be marked non-uniform. Compute shaders have no derivatives to pick a mip
+// level from, and the textures have no mips anyway, so sample level 0.
+float4 SampleBaseColor(Material material, float2 uv)
+{
+    return baseColorTextures[NonUniformResourceIndex(material.baseColorTexture)].SampleLevel(uv, 0.0) * material.baseColorFactor;
+}
+
+// The ray tracing equivalent of the raster shader's discard: a hit on a
+// transparent part of a masked triangle (e.g. around a leaf) doesn't count
+bool PassesAlphaTest(uint triangleIndex, Hit hit)
+{
+    TriangleShading triangle = shading[triangleIndex];
+    Material material = materials[triangle.materialIndex];
+    return SampleBaseColor(material, InterpolateUV(triangle, hit)).a >= material.alphaCutoff;
+}
+
 bool IntersectScene(Ray ray, float tMin, float tMax, out Hit closest)
 {
     closest = {};
@@ -134,7 +160,10 @@ bool IntersectScene(Ray ray, float tMin, float tMax, out Hit closest)
             for (uint i = node.leftOrFirst; i < node.leftOrFirst + node.triangleCount; i++)
             {
                 Hit hit;
-                if (IntersectTriangle(ray, triangles[i], tMin, tMax, hit))
+                TrianglePositions triangle = triangles[i];
+                // Only masked triangles pay for the texture lookup
+                if (IntersectTriangle(ray, triangle, tMin, tMax, hit) &&
+                    (triangle.v0.w == 0.0 || PassesAlphaTest(i, hit)))
                 {
                     closest = hit;
                     closest.triangle = i;
@@ -187,8 +216,9 @@ float3 Shade(Ray ray, Hit hit)
         normal = -normal;
 
     Material material = materials[triangle.materialIndex];
+    float3 baseColor = SampleBaseColor(material, InterpolateUV(triangle, hit)).rgb;
     float diffuse = max(dot(normal, lightDir), 0.0);
-    return material.baseColorFactor.rgb * (0.15 + 0.85 * diffuse);
+    return baseColor * (0.15 + 0.85 * diffuse);
 }
 
 [shader("compute")]

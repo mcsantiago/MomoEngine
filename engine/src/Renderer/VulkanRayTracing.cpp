@@ -4,6 +4,7 @@
 #include "Momo/Renderer/VulkanRenderer.h"
 #include "Momo/Logging/Logger.h"
 #include <glm/gtc/matrix_inverse.hpp>
+#include <algorithm>
 
 namespace Momo {
 namespace Renderer {
@@ -11,6 +12,21 @@ namespace Renderer {
     void VulkanRenderer::CheckRayTracingSupport()
     {
         m_RayTracingSupported = false;
+
+        // Every pixel can sample a different texture of the scene's texture array
+        if (!m_SupportsNonUniformTextureIndexing) {
+            LOG_WARN("VulkanRenderer", "Device lacks shaderSampledImageArrayNonUniformIndexing. Ray tracing disabled.");
+            return;
+        }
+        // Combined image samplers count against both the sampler and sampled image limits
+        const vk::PhysicalDeviceLimits limits = m_PhysicalDevice->getProperties().limits;
+        uint32_t textureLimit = std::min({ limits.maxPerStageDescriptorSamplers, limits.maxPerStageDescriptorSampledImages,
+                                           limits.maxDescriptorSetSamplers, limits.maxDescriptorSetSampledImages });
+        if (textureLimit < RayTracing::MaxRayTracingTextures) {
+            LOG_WARN("VulkanRenderer", "Device allows {} textures per shader stage, ray tracing needs {}. Ray tracing disabled.",
+                     textureLimit, RayTracing::MaxRayTracingTextures);
+            return;
+        }
 
         // The pass writes a storage image, then blits it into the swapchain image
         auto surfaceCapabilities = m_PhysicalDevice->getSurfaceCapabilitiesKHR(*m_Surface);
@@ -37,16 +53,30 @@ namespace Renderer {
 
     void VulkanRenderer::CreateRayTracingPipeline()
     {
-        // Bindings 0-3: BVH nodes, triangle positions, triangle shading, materials. 4: output image
-        std::array<vk::DescriptorSetLayoutBinding, 5> bindings{};
+        // Bindings 0-3: BVH nodes, triangle positions, triangle shading, materials.
+        // 4: output image. 5: the scene's base color textures, as an array
+        std::array<vk::DescriptorSetLayoutBinding, 6> bindings{};
         for (uint32_t i = 0; i < bindings.size(); i++) {
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
-            bindings[i].descriptorType = i < 4 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eStorageImage;
+            bindings[i].descriptorType = vk::DescriptorType::eStorageBuffer;
             bindings[i].stageFlags = vk::ShaderStageFlagBits::eCompute;
         }
+        bindings[4].descriptorType = vk::DescriptorType::eStorageImage;
+        bindings[5].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        bindings[5].descriptorCount = RayTracing::MaxRayTracingTextures;
         vk::DescriptorSetLayoutCreateInfo layoutInfo({}, bindings);
         m_RayTracingSetLayout = vk::raii::DescriptorSetLayout(*m_Device, layoutInfo);
+
+        // The pass has its own pool, sized for its single set
+        m_RayTracingDescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
+            .maxSets = 1,
+            .sizes = {
+                { vk::DescriptorType::eStorageBuffer, 4 },
+                { vk::DescriptorType::eStorageImage, 1 },
+                { vk::DescriptorType::eCombinedImageSampler, RayTracing::MaxRayTracingTextures },
+            },
+        });
 
         vk::PushConstantRange pushConstantRange(vk::ShaderStageFlagBits::eCompute, 0, sizeof(RayTracingPushConstants));
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo({}, **m_RayTracingSetLayout, pushConstantRange);
@@ -128,7 +158,7 @@ namespace Renderer {
         return AllocatedBuffer{ std::move(bufferMemory), std::move(buffer), 0 };
     }
 
-    void VulkanRenderer::UploadRayTracingScene(RayTracing::SceneGeometry geometry)
+    void VulkanRenderer::UploadRayTracingScene(RayTracing::SceneGeometry geometry, std::vector<vk::ImageView> textureViews)
     {
         if (!m_RayTracingSupported) {
             LOG_WARN("VulkanRenderer", "Ray tracing is not supported on this device. Skipping scene upload.");
@@ -136,6 +166,11 @@ namespace Renderer {
         }
         if (geometry.positions.empty()) {
             LOG_WARN("VulkanRenderer", "Ray tracing scene has no triangles. Skipping scene upload.");
+            return;
+        }
+        if (textureViews.size() != geometry.textures.size()) {
+            LOG_ERROR("VulkanRenderer", "Got {} texture views for {} ray tracing textures. Skipping scene upload.",
+                      textureViews.size(), geometry.textures.size());
             return;
         }
 
@@ -153,9 +188,10 @@ namespace Renderer {
             .materials = upload(geometry.materials),
             .stats = geometry.bvh.stats,
         });
+        m_RayTracingTextureViews = std::move(textureViews);
 
         if (!m_RayTracingDescriptorSet) {
-            m_RayTracingDescriptorSet = m_DescriptorAllocator.AllocateDescriptorSet(**m_RayTracingSetLayout);
+            m_RayTracingDescriptorSet = m_RayTracingDescriptorAllocator.AllocateDescriptorSet(**m_RayTracingSetLayout);
         }
         WriteRayTracingDescriptorSet();
 
@@ -163,8 +199,8 @@ namespace Renderer {
                           + sizeof(RayTracing::TrianglePositions) * geometry.positions.size()
                           + sizeof(RayTracing::TriangleShading) * geometry.shading.size()
                           + sizeof(RayTracing::RayTracingMaterial) * geometry.materials.size();
-        LOG_INFO("VulkanRenderer", "Uploaded ray tracing scene: {} triangles, {} materials, {:.1f} MB",
-                 geometry.positions.size(), geometry.materials.size(), totalBytes / (1024.0 * 1024.0));
+        LOG_INFO("VulkanRenderer", "Uploaded ray tracing scene: {} triangles, {} materials, {} textures, {:.1f} MB",
+                 geometry.positions.size(), geometry.materials.size(), geometry.textures.size(), totalBytes / (1024.0 * 1024.0));
     }
 
     void VulkanRenderer::WriteRayTracingDescriptorSet()
@@ -181,11 +217,19 @@ namespace Renderer {
         };
         vk::DescriptorImageInfo imageInfo({}, *m_RayTracingOutput->imageView, vk::ImageLayout::eGeneral);
 
-        std::array<vk::WriteDescriptorSet, 5> writes{};
+        // Every slot must hold a valid texture; unused ones repeat slot 0 (white)
+        std::vector<vk::DescriptorImageInfo> textureInfos(RayTracing::MaxRayTracingTextures,
+            vk::DescriptorImageInfo(*m_TextureSampler, m_RayTracingTextureViews[0], vk::ImageLayout::eShaderReadOnlyOptimal));
+        for (size_t i = 0; i < m_RayTracingTextureViews.size(); i++) {
+            textureInfos[i].imageView = m_RayTracingTextureViews[i];
+        }
+
+        std::array<vk::WriteDescriptorSet, 6> writes{};
         for (uint32_t i = 0; i < bufferInfos.size(); i++) {
             writes[i] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, i, 0, vk::DescriptorType::eStorageBuffer, nullptr, bufferInfos[i]);
         }
         writes[4] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 4, 0, vk::DescriptorType::eStorageImage, imageInfo);
+        writes[5] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 5, 0, vk::DescriptorType::eCombinedImageSampler, textureInfos);
         m_Device->updateDescriptorSets(writes, nullptr);
     }
 

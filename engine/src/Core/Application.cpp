@@ -91,7 +91,15 @@ namespace Momo
             return;
         }
         // get() rethrows anything the build threw. The renderer keeps only the GPU copy
-        m_Renderer.UploadRayTracingScene(m_PendingRayTracingGeometry.get());
+        RayTracing::SceneGeometry geometry = m_PendingRayTracingGeometry.get();
+
+        // The textures are shared with the raster path, which has usually uploaded them already
+        std::vector<vk::ImageView> textureViews;
+        textureViews.reserve(geometry.textures.size());
+        for (Assets::TextureHandle texture : geometry.textures)
+            textureViews.push_back(*m_TextureCache.GetOrCreate(texture).imageView);
+
+        m_Renderer.UploadRayTracingScene(std::move(geometry), std::move(textureViews));
     }
 
     void Application::Run()
