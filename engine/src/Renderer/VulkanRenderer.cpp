@@ -210,12 +210,14 @@ namespace Renderer {
         CreateSyncObjects();
         LOG_DEBUG("VulkanRenderer", "Creating texture sampler...");
         CreateTextureSampler();
-        // One set per material: a base color texture and a parameters UBO
+        // One set per material: a base color texture and a parameters UBO.
+        // The pool can't grow yet, so it caps the scene's material count.
+        constexpr uint32_t maxMaterials = 256;
         m_DescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
-            .maxSets = 32,
+            .maxSets = maxMaterials,
             .sizes = {
-                { vk::DescriptorType::eCombinedImageSampler, 32 },
-                { vk::DescriptorType::eUniformBuffer, 32 },
+                { vk::DescriptorType::eCombinedImageSampler, maxMaterials },
+                { vk::DescriptorType::eUniformBuffer, maxMaterials },
             },
         });
     }
