@@ -312,7 +312,7 @@ namespace Momo
             ImGui::PopID();
         }
 
-        if (ImGui::CollapsingHeader("Toon", ImGuiTreeNodeFlags_DefaultOpen))
+        if (ImGui::CollapsingHeader("Toon shading", ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::PushID("Toon");
             Renderer::ToonSettings& toon = m_ToonSettings;
