@@ -35,7 +35,7 @@ namespace Renderer {
     bool VulkanRenderer::RecordUiPass(uint32_t imageIndex, RenderMode mode)
     {
         ImDrawData* drawData = m_ImGuiInitialized ? ImGui::GetDrawData() : nullptr;
-        if (!drawData || drawData->CmdListsCount == 0) {
+        if (!drawData || drawData->TotalVtxCount == 0) {
             return false;
         }
         auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
