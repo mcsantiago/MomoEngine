@@ -83,8 +83,12 @@ namespace Momo
             if (glfwGetKey(m_Window, GLFW_KEY_P) == GLFW_PRESS) {
                 inputState.keys.SetKeyState(Input::Key::P, true);
             }
+            if (glfwGetKey(m_Window, GLFW_KEY_TAB) == GLFW_PRESS) {
+                inputState.keys.SetKeyState(Input::Key::Tab, true);
+            }
             glfwGetCursorPos(m_Window, &inputState.mouseX, &inputState.mouseY);
             inputState.windowFocused = glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
+            inputState.cursorCaptured = glfwGetInputMode(m_Window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED;
 
             // LOG_INFO("Input", "Mouse Position: ({}, {})", inputState.mouseX, inputState.mouseY);
             return inputState;
@@ -92,6 +96,9 @@ namespace Momo
 
         void PollEvents() override { glfwPollEvents(); }
         bool ShouldClose() const override { return glfwWindowShouldClose(m_Window); }
+        void SetCursorCaptured(bool captured) override {
+            glfwSetInputMode(m_Window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        }
 
         void* GetNativeHandle() const override { return m_Window; }
         std::uint32_t GetWidth()  const override { return m_Width; }
@@ -111,6 +118,7 @@ namespace Momo
                 case GLFW_KEY_SPACE: return Input::Key::Space;
                 case GLFW_KEY_ESCAPE: return Input::Key::Escape;
                 case GLFW_KEY_P: return Input::Key::P;
+                case GLFW_KEY_TAB: return Input::Key::Tab;
                 default: return Input::Key::Escape; // Default fallback
             }
         }

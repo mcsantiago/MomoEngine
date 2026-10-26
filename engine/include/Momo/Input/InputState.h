@@ -51,6 +51,7 @@ struct InputState {
     double mouseX = 0;
     double mouseY = 0;
     bool windowFocused = false;
+    bool cursorCaptured = false; // Hidden and locked to the window, for mouse look
 };
 
 class InputManager {

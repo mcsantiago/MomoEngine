@@ -9,6 +9,10 @@
 #include <glm/glm.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/string_cast.hpp>
+#include <GLFW/glfw3.h>
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
 namespace Momo
 {
     Application::Application(const ApplicationSpecification& spec)
@@ -28,6 +32,15 @@ namespace Momo
         }
         m_Window = std::unique_ptr<IWindow>(IWindow::Create(m_Spec.WindowSpec));
         m_Renderer.Init(*m_Window);
+        // Benchmarks have no UI
+        if (!m_Spec.Benchmark)
+        {
+            ImGui::CreateContext();
+            ImGui::GetIO().IniFilename = nullptr; // Don't leave imgui.ini files around
+            ImGui_ImplGlfw_InitForVulkan(static_cast<GLFWwindow*>(m_Window->GetNativeHandle()), true);
+            m_Renderer.InitImGui();
+            LOG_INFO("Momo", "Press Tab for render settings, P to cycle render modes");
+        }
         m_ModelLoader = std::unique_ptr<Assets::IModelLoader>(Assets::IModelLoader::CreateGltfModelLoader());
         m_AssetRegistry.Init();
         LoadScene(m_Spec.ScenePath);
@@ -170,6 +183,27 @@ namespace Momo
             }
             m_ToggleRenderModeHeld = toggleRenderMode;
 
+            bool toggleSettings = m_InputState.keys.IsKeyPressed(Input::Key::Tab);
+            if (toggleSettings && !m_ToggleSettingsHeld && !m_Benchmark)
+            {
+                m_ShowSettings = !m_ShowSettings;
+                m_Window->SetCursorCaptured(!m_ShowSettings);
+            }
+            m_ToggleSettingsHeld = toggleSettings;
+
+            if (!m_Benchmark)
+            {
+                // A frame is built even while the panel is hidden, so stale draw data never lingers
+                ImGui_ImplVulkan_NewFrame();
+                ImGui_ImplGlfw_NewFrame();
+                ImGui::NewFrame();
+                if (m_ShowSettings)
+                    DrawSettingsPanel();
+                ImGui::Render();
+                m_Renderer.SetLighting(m_Lighting);
+                m_Renderer.SetToonSettings(m_ToonSettings);
+            }
+
             updateTimer.Start();
             for (auto& layer : m_Layers)
                 layer->OnUpdate(dt);
@@ -240,6 +274,70 @@ namespace Momo
         }
     }
 
+    void Application::DrawSettingsPanel()
+    {
+        ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(380.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Render settings (Tab to close)");
+
+        int mode = static_cast<int>(m_RenderMode);
+        ImGui::RadioButton("Raster", &mode, static_cast<int>(Renderer::RenderMode::Raster));
+        ImGui::SameLine();
+        ImGui::RadioButton("Toon", &mode, static_cast<int>(Renderer::RenderMode::Toon));
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!m_Renderer.IsRayTracingAvailable());
+        ImGui::RadioButton("Ray traced", &mode, static_cast<int>(Renderer::RenderMode::RayTraced));
+        ImGui::EndDisabled();
+        if (mode != static_cast<int>(m_RenderMode))
+        {
+            m_RenderMode = static_cast<Renderer::RenderMode>(mode);
+            LOG_INFO("Momo", "Render mode: {}", Renderer::RenderModeName(m_RenderMode));
+        }
+        ImGui::Text("%.1f ms/frame (%.0f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+
+        if (ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::PushID("Lighting");
+            Renderer::SceneLighting& light = m_Lighting;
+            ImGui::SliderFloat("Sun azimuth", &light.sunAzimuth, -180.0f, 180.0f, "%.0f deg");
+            ImGui::SliderFloat("Sun elevation", &light.sunElevation, -10.0f, 90.0f, "%.0f deg");
+            ImGui::ColorEdit3("Sun color", &light.sunColor.x);
+            ImGui::SliderFloat("Sun intensity", &light.sunIntensity, 0.0f, 20.0f);
+            ImGui::ColorEdit3("Sky zenith", &light.skyZenith.x);
+            ImGui::ColorEdit3("Sky horizon", &light.skyHorizon.x);
+            ImGui::ColorEdit3("Sky ground", &light.skyGround.x);
+            ImGui::SliderFloat("Exposure", &light.exposure, 0.05f, 3.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::Button("Reset lighting"))
+                light = Renderer::SceneLighting{};
+            ImGui::PopID();
+        }
+
+        if (ImGui::CollapsingHeader("Toon", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::PushID("Toon");
+            Renderer::ToonSettings& toon = m_ToonSettings;
+            ImGui::SeparatorText("Bands");
+            ImGui::SliderInt("Bands", &toon.bands, 2, 8);
+            ImGui::SliderFloat("Band softness", &toon.bandSoftness, 0.0f, 1.0f);
+            ImGui::ColorEdit3("Shadow tint", &toon.shadowTint.x);
+            ImGui::SeparatorText("Highlights");
+            ImGui::SliderFloat("Specular strength", &toon.specularStrength, 0.0f, 3.0f);
+            ImGui::SliderFloat("Specular size", &toon.specularSize, 0.0f, 1.0f);
+            ImGui::ColorEdit3("Rim color", &toon.rimColor.x);
+            ImGui::SliderFloat("Rim strength", &toon.rimStrength, 0.0f, 3.0f);
+            ImGui::SliderFloat("Rim width", &toon.rimWidth, 0.0f, 1.0f);
+            ImGui::SeparatorText("Outlines");
+            ImGui::SliderFloat("Outline width", &toon.outlineWidth, 0.0f, 6.0f, "%.1f px");
+            ImGui::ColorEdit3("Outline color", &toon.outlineColor.x);
+            ImGui::SliderFloat("Depth threshold", &toon.depthThreshold, 0.001f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Normal threshold", &toon.normalThreshold, 0.01f, 2.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::Button("Reset toon"))
+                toon = Renderer::ToonSettings{};
+            ImGui::PopID();
+        }
+        ImGui::End();
+    }
+
     std::optional<Renderer::DrawFrameTime> Application::Draw(float dt)
     {
         // TODO: Should be a dedicated entity.OnUpdate(dt) call instead of directly manipulating the model matrix here
@@ -282,8 +380,14 @@ namespace Momo
 
         LOG_INFO("Momo", "Shutting down...");
 
-        // Shutdown renderer first (destroys Vulkan instance before GLFW terminates)
+        // Shutdown renderer first (destroys Vulkan instance before GLFW terminates).
+        // It shuts down the ImGui Vulkan backend, which needs the context still alive.
         m_Renderer.Shutdown();
+        if (ImGui::GetCurrentContext())
+        {
+            ImGui_ImplGlfw_Shutdown();
+            ImGui::DestroyContext();
+        }
 
         // Detach all layers before they are destroyed
         for (auto& layer : m_Layers)

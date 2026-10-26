@@ -12,6 +12,7 @@ enum Key {
     Space,
     Escape,
     P,
+    Tab,
     Count
 };
 

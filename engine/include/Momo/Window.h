@@ -17,6 +17,8 @@ namespace Momo
         virtual Input::InputState ReadInput() = 0;
         virtual void PollEvents() = 0;
         virtual bool ShouldClose() const = 0;
+        // Captured: hidden and locked to the window, for mouse look. Released: a normal cursor, e.g. for UI
+        virtual void SetCursorCaptured(bool captured) = 0;
 
         virtual void* GetNativeHandle() const = 0; // return GLFWwindow*
         virtual std::uint32_t GetWidth() const = 0;

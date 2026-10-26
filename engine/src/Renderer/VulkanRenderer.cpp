@@ -4,6 +4,7 @@
 #include "Momo/Logging/Logger.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
+#include <imgui_impl_vulkan.h>
 #include <stdexcept>
 #include <vector>
 #include <fstream>
@@ -309,6 +310,10 @@ namespace Renderer {
         // Explicitly reset the optional to destroy the instance now
         // This also implicitly destroys the VkPhysicalDevice so no need to set it here
         m_Device->waitIdle();
+        if (m_ImGuiInitialized) {
+            ImGui_ImplVulkan_Shutdown();
+            m_ImGuiInitialized = false;
+        }
         m_DescriptorAllocator.Destroy();
         m_RayTracingDescriptorAllocator.Destroy();
         m_FrameDescriptorAllocator.Destroy();
@@ -486,15 +491,15 @@ namespace Renderer {
         RecordCompositePass(imageIndex);
     }
 
-    void VulkanRenderer::EndFrame(uint32_t imageIndex, RenderMode mode)
+    void VulkanRenderer::EndFrame(uint32_t imageIndex, bool swapchainIsTransferDst, RenderMode mode)
     {
         // Implementation for ending a frame
         LOG_DEBUG("VulkanRenderer", "Ending a frame...");
 
-        // Transition the swapchain image to present layout. The raster pass
-        // leaves it as a color attachment; the ray tracing pass as a blit target.
+        // Transition the swapchain image to present layout. The raster and UI
+        // passes leave it as a color attachment; the ray tracing pass as a blit target.
         vk::ImageMemoryBarrier2 toPresent{};
-        if (mode == RenderMode::RayTraced) {
+        if (swapchainIsTransferDst) {
             toPresent.srcStageMask = vk::PipelineStageFlagBits2::eBlit;
             toPresent.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
             toPresent.oldLayout = vk::ImageLayout::eTransferDstOptimal;
@@ -610,8 +615,9 @@ namespace Renderer {
             } else {
                 RecordRasterPass(imageIndex, modelData, viewMatrix, modelMatrix);
             }
+            bool uiDrawn = RecordUiPass(imageIndex, mode);
 
-            EndFrame(imageIndex, mode);
+            EndFrame(imageIndex, mode == RenderMode::RayTraced && !uiDrawn, mode);
             frameTime.gpuFrameMs = m_LastGpuFrameMs;
             frameTime.hasRayTracingMs = m_LastRayTracingMs.has_value();
             frameTime.rayTracingMs = m_LastRayTracingMs.value_or(0.0);

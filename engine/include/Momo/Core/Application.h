@@ -67,6 +67,13 @@ namespace Momo
         Renderer::RenderMode m_RenderMode;
         bool m_ToggleRenderModeHeld = false; // Toggle once per press, not every frame the key is down
 
+        // Settings panel (Dear ImGui), shown with Tab; the cursor is released while it's open
+        bool m_ShowSettings = false;
+        bool m_ToggleSettingsHeld = false;
+        Renderer::SceneLighting m_Lighting;
+        Renderer::ToonSettings m_ToonSettings;
+        void DrawSettingsPanel();
+
         std::unique_ptr<IWindow> m_Window;
         Renderer::VulkanRenderer m_Renderer; // Maybe this can be abstracted later
         std::vector<std::unique_ptr<Layer>> m_Layers;

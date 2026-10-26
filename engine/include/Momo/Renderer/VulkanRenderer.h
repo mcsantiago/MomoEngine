@@ -156,6 +156,9 @@ public:
 
     void Init(const IWindow& window);
     void Shutdown();
+    // Sets up the Dear ImGui Vulkan backend; the caller owns the ImGui context
+    // and the platform backend. Each frame then draws ImGui::GetDrawData() on top.
+    void InitImGui();
     DrawFrameTime RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix, RenderMode mode);
 
     // Uploads the scene's ray tracing geometry and keeps only the GPU copy.
@@ -225,7 +228,11 @@ private:
     void CreateCompositePipeline();
     AllocatedImage CreateNormalBuffer();
     void WriteCompositeDescriptorSet();
-    void EndFrame(uint32_t imageIndex, RenderMode mode);
+    // Draws the UI on top of the frame. Returns false if there was nothing to
+    // draw, in which case the swapchain image's layout is left as it was.
+    bool RecordUiPass(uint32_t imageIndex, RenderMode mode);
+    // swapchainIsTransferDst: the ray tracing pass's blit was the last write
+    void EndFrame(uint32_t imageIndex, bool swapchainIsTransferDst, RenderMode mode);
 
     // Ray tracing (VulkanRayTracing.cpp)
     void CheckRayTracingSupport();
@@ -318,6 +325,9 @@ private:
     uint32_t m_PointLightCount = 0;
     static constexpr float NearPlane = 0.1f;
     static constexpr float FarPlane = 100.0f;
+
+    bool m_ImGuiInitialized = false;
+    vk::Format m_ImGuiColorFormat; // Referenced by the backend's pipeline info
 
     // Composite pass: reads the raster pass's depth and normals
     std::optional<AllocatedImage> m_NormalBuffer; // World-space normals; a = 0 where nothing was drawn

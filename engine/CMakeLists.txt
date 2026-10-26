@@ -9,6 +9,7 @@ add_library(MomoEngine STATIC
   src/Renderer/VulkanRenderer.cpp
   src/Renderer/VulkanRayTracing.cpp
   src/Renderer/VulkanLighting.cpp
+  src/Renderer/VulkanUi.cpp
   include/Momo/Renderer/Lighting.h
   include/Momo/Renderer/DescriptorAllocator.h
   src/Renderer/DescriptorAllocator.cpp
@@ -67,7 +68,15 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/nothings/stb.git
   GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
 )
-FetchContent_MakeAvailable(fastgltf glfw stb)
+
+# ----------- Dear ImGui (debug UI) via FetchContent -----------------
+# No CMakeLists of its own; the library is defined below, once Vulkan is found.
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG v1.92.9
+)
+FetchContent_MakeAvailable(fastgltf glfw stb imgui)
 
 target_include_directories(MomoEngine PRIVATE ${stb_SOURCE_DIR})
 
@@ -89,12 +98,25 @@ find_package(Vulkan REQUIRED)
 # Link the Vulkan loader and GLFW
 # Use Vulkan::Vulkan to be cross-platform (Win: vulkan-1.lib, Linux: libvulkan.so, macOS: MoltenVK dylib)
 # Vulkan is PUBLIC because VulkanRenderer.h is included in public headers (Application.h)
+# Core plus the GLFW and Vulkan backends
+add_library(imgui STATIC
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+)
+target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
+
 target_link_libraries(MomoEngine
   PUBLIC
     Vulkan::Vulkan
   PRIVATE
     glfw
     fastgltf::fastgltf
+    imgui
 )
 
 # If your GLFW code includes <GLFW/glfw3.h> and you want it to include <vulkan/vulkan.h> for you:
