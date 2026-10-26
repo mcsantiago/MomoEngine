@@ -47,6 +47,10 @@ struct FrameUniforms {
     uint   shadowsEnabled;     // Raster only; the path tracer traces shadow rays
     float  shadowNormalOffset; // World units to move a point along its normal before the lookup
     float  shadowFilterRadius; // Shadow map texels between filter taps; larger = softer edges
+    uint   pointShadowCount;   // Point lights 0..count-1 have a cube shadow map (raster only)
+    float  pointShadowNear;    // Of every cube face's projection
+    float  pointShadowFar;
+    float  pointShadowBias;    // Cube map texels to move a point along its normal before the lookup
     ToonParams toon;
 };
 [vk::binding(0, 1)] ConstantBuffer<FrameUniforms> frame;
@@ -61,6 +65,37 @@ struct PointLight {
 // Depth of the scene seen from the sun (shadow.slang), sampled with a depth
 // comparison: 1 where the reference is no farther than the stored depth
 [vk::binding(2, 1)] Sampler2DShadow shadowMap;
+
+// Depth seen from point light i in each direction (shadow.slang, six faces
+// per light), sampled with a depth comparison like shadowMap
+static const uint MaxShadowedPointLights = 4;
+[vk::binding(3, 1)] SamplerCubeShadow pointShadowMaps[MaxShadowedPointLights];
+
+// Fraction of point light i reaching a point, like SunVisibility. The cube
+// face that a direction falls on is the one of its largest component, and
+// that component is the depth along the face's view axis, which the face's
+// perspective projection maps to the stored depth.
+float PointLightVisibility(uint index, float3 position, float3 normal)
+{
+    if (index >= frame.pointShadowCount)
+        return 1.0;
+    uint width, height;
+    pointShadowMaps[index].GetDimensions(width, height);
+    float3 fromLight = position - pointLights[index].position.xyz;
+    float3 axes = abs(fromLight);
+    float axisDistance = max(axes.x, max(axes.y, axes.z));
+    // A 90 degree face spans 2 units at unit depth, so a texel covers 2 / width there
+    fromLight += normal * (frame.pointShadowBias * axisDistance * 2.0 / float(width));
+    axes = abs(fromLight);
+    axisDistance = max(axes.x, max(axes.y, axes.z));
+    float near = frame.pointShadowNear;
+    float far = frame.pointShadowFar;
+    // Beyond the map's reach, or inside its near plane: nothing recorded there
+    if (axisDistance >= far || axisDistance <= near)
+        return 1.0;
+    float depth = far / (far - near) * (1.0 - near / axisDistance);
+    return pointShadowMaps[index].SampleCmpLevelZero(fromLight, depth);
+}
 
 // Fraction of the sun reaching a point: 1 lit, 0 in shadow, in between at
 // shadow edges. Averages 3x3 comparisons (percentage-closer filtering), each

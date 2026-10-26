@@ -418,6 +418,8 @@ namespace Momo
             ImGui::Checkbox("Shadows", &light.shadows);
             ImGui::SliderFloat("Shadow softness", &light.shadowSoftness, 0.0f, 4.0f, "%.1f texels");
             ImGui::SliderFloat("Shadow bias", &light.shadowNormalBias, 0.0f, 6.0f, "%.1f texels");
+            ImGui::Checkbox("Point light shadows", &light.pointShadows);
+            ImGui::SliderFloat("Point shadow bias", &light.pointShadowBias, 0.0f, 6.0f, "%.1f texels");
             if (ImGui::Button("Reset lighting"))
                 light = Renderer::SceneLighting{};
             ImGui::PopID();

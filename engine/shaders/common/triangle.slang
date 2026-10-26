@@ -1,5 +1,6 @@
 // Raster pass: draws the scene's meshes lit by the scene lighting
-// (lighting.slang), with sun shadows from a shadow map but no bounce light. frame.shadingModel picks
+// (lighting.slang), with shadows from shadow maps (the sun's and up to
+// MaxShadowedPointLights point lights') but no bounce light. frame.shadingModel picks
 // how a surface turns light into color: Lambert (matte, like the path
 // tracer's direct light) or toon. Also writes each pixel's normal for the
 // outlines in composite.slang.
@@ -75,7 +76,9 @@ float3 ShadeLambert(float3 albedo, float3 normal, float3 position)
     for (uint i = 0; i < frame.pointLightCount; i++)
     {
         LightSample sample = SamplePointLight(pointLights[i], position);
-        light += sample.irradiance / Pi * saturate(dot(normal, sample.direction));
+        float cosine = saturate(dot(normal, sample.direction));
+        if (cosine > 0.0)
+            light += sample.irradiance / Pi * cosine * PointLightVisibility(i, position, normal);
     }
     return albedo * light;
 }
@@ -109,7 +112,9 @@ float3 ShadeToon(float3 albedo, float3 normal, float3 position, float3 toViewer)
     for (uint i = 0; i < frame.pointLightCount; i++)
     {
         LightSample sample = SamplePointLight(pointLights[i], position);
-        light += sample.irradiance / Pi * Band(dot(normal, sample.direction));
+        float cosine = dot(normal, sample.direction);
+        float visibility = cosine > 0.0 ? PointLightVisibility(i, position, normal) : 0.0;
+        light += sample.irradiance / Pi * Band(cosine * visibility);
     }
     float3 color = albedo * light;
 

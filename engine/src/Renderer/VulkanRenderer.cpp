@@ -371,6 +371,7 @@ namespace Renderer {
         if (m_Lighting.shadows) {
             RecordShadowPass(modelData, modelMatrix);
         }
+        RecordPointShadowPasses(modelData, modelMatrix);
 
         vk::ImageMemoryBarrier2 toColorAttachment{};
         toColorAttachment.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;

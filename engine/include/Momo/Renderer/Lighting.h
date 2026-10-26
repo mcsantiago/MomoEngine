@@ -24,6 +24,8 @@ struct SceneLighting
     bool shadows = true;
     float shadowSoftness = 1.0f;   // Shadow map texels between filter taps; 0 = hardest edge
     float shadowNormalBias = 1.5f; // Shadow map texels to move a point along its normal before the lookup
+    bool pointShadows = true;      // Cube shadow maps for the first few point lights
+    float pointShadowBias = 1.5f;  // Cube map texels to move a point along its normal before the lookup
 
     // Unit vector toward the sun
     glm::vec3 SunDirection() const

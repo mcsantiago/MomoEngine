@@ -87,9 +87,13 @@ struct FrameUniforms
     uint32_t  shadowsEnabled;
     float     shadowNormalOffset; // World units
     float     shadowFilterRadius; // Shadow map texels
+    uint32_t  pointShadowCount;
+    float     pointShadowNear;
+    float     pointShadowFar;
+    float     pointShadowBias;    // Cube map texels
     ToonUniforms toon;
 };
-static_assert(sizeof(FrameUniforms) == 352, "FrameUniforms must match lighting.slang");
+static_assert(sizeof(FrameUniforms) == 368, "FrameUniforms must match lighting.slang");
 
 // A point light as lighting.slang reads it (set 1 binding 1; std430)
 struct GpuPointLight
@@ -237,6 +241,14 @@ private:
     void RecordShadowPass(const VulkanModelData& modelData, const glm::mat4& modelMatrix);
     void CreateShadowMap();
     void CreateShadowPipeline();
+    // Cube shadow maps of the first MaxShadowedPointLights point lights,
+    // re-rendered only when a light moves (the scene is static)
+    void CreatePointShadowMaps();
+    void RecordPointShadowPasses(const VulkanModelData& modelData, const glm::mat4& modelMatrix);
+    // Draws the scene's depth into one shadow map face or the sun map
+    void DrawShadowCasters(const VulkanModelData& modelData, const glm::mat4& modelMatrix, const glm::mat4& viewProjection,
+                           vk::ImageView target, uint32_t size);
+    uint32_t PointShadowCount() const;
     // World -> the shadow map's clip space: an orthographic box around the
     // scene bounds, looking along the sun's direction
     glm::mat4 SunViewProjection() const;
@@ -374,6 +386,17 @@ private:
     std::optional<AllocatedImage> m_ShadowMap;
     std::optional<vk::raii::Sampler> m_ShadowSampler; // Depth comparison
     std::optional<vk::raii::Pipeline> m_ShadowPipeline; // Uses the raster pass's pipeline layout
+    static constexpr uint32_t MaxShadowedPointLights = 4; // Matches lighting.slang
+    static constexpr uint32_t PointShadowMapSize = 1024;
+    static constexpr float PointShadowNear = 0.05f;
+    struct PointShadowMap
+    {
+        AllocatedImage cube;                     // Six layers; imageView is the cube view the shaders sample
+        std::vector<vk::raii::ImageView> faces;  // One 2D view per layer, to render into
+    };
+    std::vector<PointShadowMap> m_PointShadowMaps;
+    std::vector<glm::vec3> m_PointShadowPositions; // Light positions the maps were rendered for
+    float m_PointShadowFar = 100.0f;               // Reaches the whole scene from any of the lights
     glm::vec3 m_ShadowBoundsMin{ -1.0f };
     glm::vec3 m_ShadowBoundsMax{ 1.0f };
 

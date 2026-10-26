@@ -8,11 +8,13 @@ namespace Renderer {
     void VulkanRenderer::CreateFrameResources()
     {
         // Binding 0: FrameUniforms. 1: point lights. 2: the sun's shadow map.
+        // 3: point lights' cube shadow maps.
         constexpr vk::ShaderStageFlags stages = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment | vk::ShaderStageFlagBits::eCompute;
-        std::array<vk::DescriptorSetLayoutBinding, 3> bindings{
+        std::array<vk::DescriptorSetLayoutBinding, 4> bindings{
             vk::DescriptorSetLayoutBinding(0, vk::DescriptorType::eUniformBuffer, 1, stages),
             vk::DescriptorSetLayoutBinding(1, vk::DescriptorType::eStorageBuffer, 1, stages),
             vk::DescriptorSetLayoutBinding(2, vk::DescriptorType::eCombinedImageSampler, 1, stages),
+            vk::DescriptorSetLayoutBinding(3, vk::DescriptorType::eCombinedImageSampler, MaxShadowedPointLights, stages),
         };
         m_FrameSetLayout = vk::raii::DescriptorSetLayout(*m_Device, vk::DescriptorSetLayoutCreateInfo({}, bindings));
 
@@ -28,7 +30,7 @@ namespace Renderer {
             .sizes = {
                 { vk::DescriptorType::eUniformBuffer, MAX_FRAMES_IN_FLIGHT },
                 { vk::DescriptorType::eStorageBuffer, MAX_FRAMES_IN_FLIGHT },
-                { vk::DescriptorType::eCombinedImageSampler, 2 + MAX_FRAMES_IN_FLIGHT },
+                { vk::DescriptorType::eCombinedImageSampler, 2 + MAX_FRAMES_IN_FLIGHT * (1 + MaxShadowedPointLights) },
             },
         });
 
@@ -52,15 +54,21 @@ namespace Renderer {
         m_NearestSampler = vk::raii::Sampler(*m_Device, samplerInfo);
 
         CreateShadowMap();
+        CreatePointShadowMaps();
+        std::vector<vk::DescriptorImageInfo> pointShadowInfos;
+        for (const PointShadowMap& map : m_PointShadowMaps) {
+            pointShadowInfos.emplace_back(**m_ShadowSampler, *map.cube.imageView, vk::ImageLayout::eShaderReadOnlyOptimal);
+        }
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vk::DescriptorBufferInfo uniformInfo(*m_FrameUniformBuffers[i].buffer, 0, sizeof(FrameUniforms));
             vk::DescriptorBufferInfo lightInfo(*m_PointLightBuffers[i].buffer, 0, vk::WholeSize);
             vk::DescriptorImageInfo shadowInfo(**m_ShadowSampler, *m_ShadowMap->imageView, vk::ImageLayout::eShaderReadOnlyOptimal);
-            std::array<vk::WriteDescriptorSet, 3> writes{
+            std::array<vk::WriteDescriptorSet, 4> writes{
                 vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 0, 0, vk::DescriptorType::eUniformBuffer, nullptr, uniformInfo),
                 vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 1, 0, vk::DescriptorType::eStorageBuffer, nullptr, lightInfo),
                 vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 2, 0, vk::DescriptorType::eCombinedImageSampler, shadowInfo),
+                vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 3, 0, vk::DescriptorType::eCombinedImageSampler, pointShadowInfos),
             };
             m_Device->updateDescriptorSets(writes, nullptr);
         }
@@ -108,6 +116,10 @@ namespace Renderer {
             .shadowsEnabled = lighting.shadows && mode != RenderMode::RayTraced ? 1u : 0u,
             .shadowNormalOffset = lighting.shadowNormalBias * ShadowTexelWorldSize(),
             .shadowFilterRadius = lighting.shadowSoftness,
+            .pointShadowCount = mode == RenderMode::RayTraced ? 0u : PointShadowCount(),
+            .pointShadowNear = PointShadowNear,
+            .pointShadowFar = m_PointShadowFar,
+            .pointShadowBias = lighting.pointShadowBias,
             .toon = ToonUniforms{
                 .shadowTint = glm::vec4(toon.shadowTint, 0.0f),
                 .rimColor = glm::vec4(toon.rimColor, 0.0f),

@@ -8,6 +8,9 @@ namespace Renderer {
     {
         m_ShadowBoundsMin = min;
         m_ShadowBoundsMax = max;
+        // From anywhere in the bounds, the far corner is at most the diagonal away
+        m_PointShadowFar = std::max(glm::length(max - min), 1.0f);
+        m_PointShadowPositions.clear();
     }
 
     glm::mat4 VulkanRenderer::SunViewProjection() const
@@ -137,6 +140,42 @@ namespace Renderer {
         m_ShadowPipeline = vk::raii::Pipeline(*m_Device, nullptr, pipelineInfo);
     }
 
+    void VulkanRenderer::DrawShadowCasters(const VulkanModelData& modelData, const glm::mat4& modelMatrix, const glm::mat4& viewProjection,
+                                           vk::ImageView target, uint32_t size)
+    {
+        auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
+        vk::RenderingAttachmentInfo depthAttachment{};
+        depthAttachment.imageView = target;
+        depthAttachment.imageLayout = vk::ImageLayout::eDepthAttachmentOptimal;
+        depthAttachment.loadOp = vk::AttachmentLoadOp::eClear;
+        depthAttachment.storeOp = vk::AttachmentStoreOp::eStore;
+        depthAttachment.clearValue = vk::ClearValue().setDepthStencil({ 1.0f, 0 });
+
+        vk::RenderingInfo renderingInfo{};
+        renderingInfo.renderArea = vk::Rect2D({ 0, 0 }, { size, size });
+        renderingInfo.layerCount = 1;
+        renderingInfo.pDepthAttachment = &depthAttachment;
+
+        commandBuffer.beginRendering(renderingInfo);
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, **m_ShadowPipeline);
+        commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(size), static_cast<float>(size), 0.0f, 1.0f));
+        commandBuffer.setScissor(0, vk::Rect2D({ 0, 0 }, { size, size }));
+        for (const auto& mesh : modelData.meshes) {
+            // The material set, for alpha-masked cut-outs
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 0, { mesh.materialData.descriptorSet }, nullptr);
+            commandBuffer.bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, { 0 });
+            commandBuffer.bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
+            PushConstantData pushConstantData{
+                .projectionMatrix = viewProjection,
+                .viewMatrix = glm::mat4(1.0f),
+                .modelMatrix = modelMatrix * mesh.localTransform,
+            };
+            commandBuffer.pushConstants<PushConstantData>(**m_PipelineLayout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, pushConstantData);
+            commandBuffer.drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0);
+        }
+        commandBuffer.endRendering();
+    }
+
     void VulkanRenderer::RecordShadowPass(const VulkanModelData& modelData, const glm::mat4& modelMatrix)
     {
         auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
@@ -157,38 +196,7 @@ namespace Renderer {
         beforeDependency.setImageMemoryBarriers(toAttachment);
         commandBuffer.pipelineBarrier2(beforeDependency);
 
-        vk::RenderingAttachmentInfo depthAttachment{};
-        depthAttachment.imageView = *m_ShadowMap->imageView;
-        depthAttachment.imageLayout = vk::ImageLayout::eDepthAttachmentOptimal;
-        depthAttachment.loadOp = vk::AttachmentLoadOp::eClear;
-        depthAttachment.storeOp = vk::AttachmentStoreOp::eStore;
-        depthAttachment.clearValue = vk::ClearValue().setDepthStencil({ 1.0f, 0 });
-
-        vk::RenderingInfo renderingInfo{};
-        renderingInfo.renderArea = vk::Rect2D({ 0, 0 }, { ShadowMapSize, ShadowMapSize });
-        renderingInfo.layerCount = 1;
-        renderingInfo.pDepthAttachment = &depthAttachment;
-
-        commandBuffer.beginRendering(renderingInfo);
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, **m_ShadowPipeline);
-        commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(ShadowMapSize), static_cast<float>(ShadowMapSize), 0.0f, 1.0f));
-        commandBuffer.setScissor(0, vk::Rect2D({ 0, 0 }, { ShadowMapSize, ShadowMapSize }));
-
-        glm::mat4 sunViewProjection = SunViewProjection();
-        for (const auto& mesh : modelData.meshes) {
-            // The material set, for alpha-masked cut-outs
-            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 0, { mesh.materialData.descriptorSet }, nullptr);
-            commandBuffer.bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, { 0 });
-            commandBuffer.bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
-            PushConstantData pushConstantData{
-                .projectionMatrix = sunViewProjection,
-                .viewMatrix = glm::mat4(1.0f),
-                .modelMatrix = modelMatrix * mesh.localTransform,
-            };
-            commandBuffer.pushConstants<PushConstantData>(**m_PipelineLayout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, pushConstantData);
-            commandBuffer.drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0);
-        }
-        commandBuffer.endRendering();
+        DrawShadowCasters(modelData, modelMatrix, SunViewProjection(), *m_ShadowMap->imageView, ShadowMapSize);
 
         // Depth writes -> the raster pass's reads
         vk::ImageMemoryBarrier2 toReadable{};
@@ -203,6 +211,157 @@ namespace Renderer {
         vk::DependencyInfo afterDependency{};
         afterDependency.setImageMemoryBarriers(toReadable);
         commandBuffer.pipelineBarrier2(afterDependency);
+    }
+
+    uint32_t VulkanRenderer::PointShadowCount() const
+    {
+        return m_Lighting.pointShadows ? static_cast<uint32_t>(std::min<size_t>(m_PointLights.size(), MaxShadowedPointLights)) : 0;
+    }
+
+    namespace
+    {
+        // World -> view space of each cube face, looking out from position, in
+        // layer order +X, -X, +Y, -Y, +Z, -Z. Cube sampling (Vulkan spec,
+        // "Cube Map Face Selection") reads a direction r on face +X at
+        // s = -r.z / r.x, t = -r.y / r.x, and so on per face; rows 0 and 1 make
+        // the view x and y exactly those numerators, row 2 points the view's -z
+        // along the face axis, so after a 90 degree projection each pixel lands
+        // where sampling will look for it. Row 0 of a framebuffer is NDC y = -1,
+        // which is t = 0, so no flip is needed.
+        glm::mat4 CubeFaceView(uint32_t face, const glm::vec3& position)
+        {
+            static const std::array<std::array<glm::vec3, 3>, 6> rows{ {
+                { glm::vec3(0, 0, -1), glm::vec3(0, -1, 0), glm::vec3(-1, 0, 0) }, // +X
+                { glm::vec3(0, 0, 1),  glm::vec3(0, -1, 0), glm::vec3(1, 0, 0) },  // -X
+                { glm::vec3(1, 0, 0),  glm::vec3(0, 0, 1),  glm::vec3(0, -1, 0) }, // +Y
+                { glm::vec3(1, 0, 0),  glm::vec3(0, 0, -1), glm::vec3(0, 1, 0) },  // -Y
+                { glm::vec3(1, 0, 0),  glm::vec3(0, -1, 0), glm::vec3(0, 0, -1) }, // +Z
+                { glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0), glm::vec3(0, 0, 1) },  // -Z
+            } };
+            glm::mat4 view(1.0f);
+            for (int row = 0; row < 3; row++) {
+                for (int column = 0; column < 3; column++) {
+                    view[column][row] = rows[face][row][column];
+                }
+                view[3][row] = -glm::dot(rows[face][row], position);
+            }
+            return view;
+        }
+    }
+
+    void VulkanRenderer::CreatePointShadowMaps()
+    {
+        const vk::ImageSubresourceRange allFaces(vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 6);
+        auto commandBuffer = BeginSingleUseCommandBuffer();
+        for (uint32_t light = 0; light < MaxShadowedPointLights; light++) {
+            auto image = vk::raii::Image(*m_Device, vk::ImageCreateInfo(
+                vk::ImageCreateFlagBits::eCubeCompatible,
+                vk::ImageType::e2D,
+                m_DepthFormat,
+                vk::Extent3D{ PointShadowMapSize, PointShadowMapSize, 1 },
+                1,
+                6,
+                vk::SampleCountFlagBits::e1,
+                vk::ImageTiling::eOptimal,
+                vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+                vk::SharingMode::eExclusive,
+                0,
+                nullptr,
+                vk::ImageLayout::eUndefined
+            ));
+            vk::MemoryRequirements memRequirements = image.getMemoryRequirements();
+            uint32_t memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal);
+            auto imageMemory = vk::raii::DeviceMemory(*m_Device, vk::MemoryAllocateInfo(memRequirements.size, memoryTypeIndex));
+            image.bindMemory(*imageMemory, 0);
+            auto cubeView = vk::raii::ImageView(*m_Device, vk::ImageViewCreateInfo({}, *image, vk::ImageViewType::eCube, m_DepthFormat, {}, allFaces));
+
+            PointShadowMap map{ AllocatedImage{ std::move(imageMemory), std::move(image), std::move(cubeView), PointShadowMapSize, PointShadowMapSize }, {} };
+            for (uint32_t face = 0; face < 6; face++) {
+                map.faces.emplace_back(*m_Device, vk::ImageViewCreateInfo({}, *map.cube.image, vk::ImageViewType::e2D, m_DepthFormat, {},
+                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth, 0, 1, face, 1)));
+            }
+
+            // Readable from the start, like the sun's map: lights without a
+            // shadow still sit in the descriptor array. Cleared to the far
+            // plane, so they would read as unshadowed.
+            vk::ImageMemoryBarrier2 toClear{};
+            toClear.srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe;
+            toClear.dstStageMask = vk::PipelineStageFlagBits2::eClear;
+            toClear.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
+            toClear.oldLayout = vk::ImageLayout::eUndefined;
+            toClear.newLayout = vk::ImageLayout::eTransferDstOptimal;
+            toClear.image = *map.cube.image;
+            toClear.subresourceRange = allFaces;
+            vk::DependencyInfo clearDependency{};
+            clearDependency.setImageMemoryBarriers(toClear);
+            commandBuffer.pipelineBarrier2(clearDependency);
+            commandBuffer.clearDepthStencilImage(*map.cube.image, vk::ImageLayout::eTransferDstOptimal, vk::ClearDepthStencilValue(1.0f, 0), allFaces);
+
+            vk::ImageMemoryBarrier2 toReadable{};
+            toReadable.srcStageMask = vk::PipelineStageFlagBits2::eClear;
+            toReadable.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+            toReadable.dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader;
+            toReadable.dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead;
+            toReadable.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+            toReadable.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            toReadable.image = *map.cube.image;
+            toReadable.subresourceRange = allFaces;
+            vk::DependencyInfo readableDependency{};
+            readableDependency.setImageMemoryBarriers(toReadable);
+            commandBuffer.pipelineBarrier2(readableDependency);
+
+            m_PointShadowMaps.push_back(std::move(map));
+        }
+        EndSingleUseCommandBuffer(commandBuffer);
+    }
+
+    void VulkanRenderer::RecordPointShadowPasses(const VulkanModelData& modelData, const glm::mat4& modelMatrix)
+    {
+        // The scene doesn't move, so the maps only change with the lights
+        std::vector<glm::vec3> positions;
+        for (uint32_t i = 0; i < PointShadowCount(); i++) {
+            positions.push_back(glm::vec3(m_PointLights[i].position));
+        }
+        if (positions == m_PointShadowPositions) {
+            return;
+        }
+        m_PointShadowPositions = positions;
+
+        auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
+        const vk::ImageSubresourceRange allFaces(vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 6);
+        glm::mat4 projection = glm::perspective(glm::radians(90.0f), 1.0f, PointShadowNear, m_PointShadowFar);
+        for (uint32_t light = 0; light < positions.size(); light++) {
+            const PointShadowMap& map = m_PointShadowMaps[light];
+            // Earlier frames may still be reading it; every face is cleared, so its contents can go
+            vk::ImageMemoryBarrier2 toAttachment{};
+            toAttachment.srcStageMask = vk::PipelineStageFlagBits2::eFragmentShader;
+            toAttachment.dstStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests;
+            toAttachment.dstAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentRead | vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+            toAttachment.oldLayout = vk::ImageLayout::eUndefined;
+            toAttachment.newLayout = vk::ImageLayout::eDepthAttachmentOptimal;
+            toAttachment.image = *map.cube.image;
+            toAttachment.subresourceRange = allFaces;
+            vk::DependencyInfo before{};
+            before.setImageMemoryBarriers(toAttachment);
+            commandBuffer.pipelineBarrier2(before);
+
+            for (uint32_t face = 0; face < 6; face++) {
+                DrawShadowCasters(modelData, modelMatrix, projection * CubeFaceView(face, positions[light]), *map.faces[face], PointShadowMapSize);
+            }
+
+            vk::ImageMemoryBarrier2 toReadable{};
+            toReadable.srcStageMask = vk::PipelineStageFlagBits2::eLateFragmentTests;
+            toReadable.srcAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+            toReadable.dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader;
+            toReadable.dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead;
+            toReadable.oldLayout = vk::ImageLayout::eDepthAttachmentOptimal;
+            toReadable.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            toReadable.image = *map.cube.image;
+            toReadable.subresourceRange = allFaces;
+            vk::DependencyInfo after{};
+            after.setImageMemoryBarriers(toReadable);
+            commandBuffer.pipelineBarrier2(after);
+        }
     }
 } // namespace Renderer
 } // namespace Momo
