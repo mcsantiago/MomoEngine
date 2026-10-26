@@ -202,6 +202,7 @@ namespace Renderer {
         LOG_DEBUG("VulkanRenderer", "Creating graphics pipeline...");
         CreateGraphicsPipeline();
         CreateCompositePipeline();
+        CreateShadowPipeline();
         LOG_DEBUG("VulkanRenderer", "Checking ray tracing support...");
         CheckRayTracingSupport();
         if (m_RayTracingSupported) {
@@ -367,6 +368,10 @@ namespace Renderer {
 
     void VulkanRenderer::RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix)
     {
+        if (m_Lighting.shadows) {
+            RecordShadowPass(modelData, modelMatrix);
+        }
+
         vk::ImageMemoryBarrier2 toColorAttachment{};
         toColorAttachment.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
         toColorAttachment.srcAccessMask = {};

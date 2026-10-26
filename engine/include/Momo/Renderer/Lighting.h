@@ -20,6 +20,10 @@ struct SceneLighting
     glm::vec3 skyHorizon{ 1.0f, 0.55f, 0.35f };
     glm::vec3 skyZenith{ 0.3f, 0.36f, 0.65f };
     float exposure = 0.6f; // Scales light before tonemapping; higher is brighter
+    // Sun shadows of the raster modes, from a shadow map (the path tracer traces them)
+    bool shadows = true;
+    float shadowSoftness = 1.0f;   // Shadow map texels between filter taps; 0 = hardest edge
+    float shadowNormalBias = 1.5f; // Shadow map texels to move a point along its normal before the lookup
 
     // Unit vector toward the sun
     glm::vec3 SunDirection() const

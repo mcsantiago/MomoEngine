@@ -71,6 +71,7 @@ static_assert(sizeof(ToonUniforms) == 96, "ToonUniforms must match ToonParams in
 struct FrameUniforms
 {
     glm::mat4 inverseViewProjection;
+    glm::mat4 sunViewProjection;
     glm::vec4 cameraPosition;
     glm::vec4 sunDirection;
     glm::vec4 sunIrradiance;
@@ -82,10 +83,12 @@ struct FrameUniforms
     uint32_t  shadingModel; // ShadingModel
     float     nearPlane;
     float     farPlane;
-    float     padding[3];
+    uint32_t  shadowsEnabled;
+    float     shadowNormalOffset; // World units
+    float     shadowFilterRadius; // Shadow map texels
     ToonUniforms toon;
 };
-static_assert(sizeof(FrameUniforms) == 288, "FrameUniforms must match lighting.slang");
+static_assert(sizeof(FrameUniforms) == 352, "FrameUniforms must match lighting.slang");
 
 // A point light as lighting.slang reads it (set 1 binding 1; std430)
 struct GpuPointLight
@@ -170,6 +173,8 @@ public:
     // Used from the next frame on
     void SetLighting(const SceneLighting& lighting) { m_Lighting = lighting; }
     void SetToonSettings(const ToonSettings& toon) { m_Toon = toon; }
+    // World-space box around the scene; the sun's shadow map covers it
+    void SetShadowBounds(const glm::vec3& min, const glm::vec3& max);
     // False if the device can't present a ray traced image or no scene was uploaded
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
     uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
@@ -221,6 +226,15 @@ private:
     void RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix);
     // Sky behind the raster pass's geometry, and toon outlines over it (composite.slang)
     void RecordCompositePass(uint32_t imageIndex);
+    // The scene's depth seen from the sun, for the raster pass's shadows (VulkanShadows.cpp)
+    void RecordShadowPass(const VulkanModelData& modelData, const glm::mat4& modelMatrix);
+    void CreateShadowMap();
+    void CreateShadowPipeline();
+    // World -> the shadow map's clip space: an orthographic box around the
+    // scene bounds, looking along the sun's direction
+    glm::mat4 SunViewProjection() const;
+    // World-space size of one shadow map texel
+    float ShadowTexelWorldSize() const;
 
     // Lighting shared by every pipeline (VulkanLighting.cpp)
     void CreateFrameResources();
@@ -328,6 +342,14 @@ private:
 
     bool m_ImGuiInitialized = false;
     vk::Format m_ImGuiColorFormat; // Referenced by the backend's pipeline info
+
+    // Sun shadow map: shared by all frames in flight, like the depth buffer
+    static constexpr uint32_t ShadowMapSize = 4096;
+    std::optional<AllocatedImage> m_ShadowMap;
+    std::optional<vk::raii::Sampler> m_ShadowSampler; // Depth comparison
+    std::optional<vk::raii::Pipeline> m_ShadowPipeline; // Uses the raster pass's pipeline layout
+    glm::vec3 m_ShadowBoundsMin{ -1.0f };
+    glm::vec3 m_ShadowBoundsMax{ 1.0f };
 
     // Composite pass: reads the raster pass's depth and normals
     std::optional<AllocatedImage> m_NormalBuffer; // World-space normals; a = 0 where nothing was drawn

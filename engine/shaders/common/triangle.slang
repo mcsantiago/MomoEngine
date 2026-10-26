@@ -1,5 +1,5 @@
 // Raster pass: draws the scene's meshes lit by the scene lighting
-// (lighting.slang), without shadows or bounce light. frame.shadingModel picks
+// (lighting.slang), with sun shadows from a shadow map but no bounce light. frame.shadingModel picks
 // how a surface turns light into color: Lambert (matte, like the path
 // tracer's direct light) or toon. Also writes each pixel's normal for the
 // outlines in composite.slang.
@@ -69,7 +69,9 @@ VertexOutput vertMain(VertexInput input) {
 float3 ShadeLambert(float3 albedo, float3 normal, float3 position)
 {
     float3 light = SkyAmbient(normal);
-    light += frame.sunIrradiance.rgb / Pi * saturate(dot(normal, frame.sunDirection.xyz));
+    float sunCosine = saturate(dot(normal, frame.sunDirection.xyz));
+    if (sunCosine > 0.0)
+        light += frame.sunIrradiance.rgb / Pi * sunCosine * SunVisibility(position, normal);
     for (uint i = 0; i < frame.pointLightCount; i++)
     {
         LightSample sample = SamplePointLight(pointLights[i], position);
@@ -99,8 +101,11 @@ float3 ShadeToon(float3 albedo, float3 normal, float3 position, float3 toViewer)
     float3 sunDirection = frame.sunDirection.xyz;
     float sunCosine = dot(normal, sunDirection);
 
+    // In shadow counts as facing away: the bands then give shadows the same
+    // crisp edges as the light falling off around a curve
+    float sunVisibility = sunCosine > 0.0 ? SunVisibility(position, normal) : 0.0;
     float3 light = SkyAmbient(normal) * toon.shadowTint.rgb;
-    light += frame.sunIrradiance.rgb / Pi * Band(sunCosine);
+    light += frame.sunIrradiance.rgb / Pi * Band(sunCosine * sunVisibility);
     for (uint i = 0; i < frame.pointLightCount; i++)
     {
         LightSample sample = SamplePointLight(pointLights[i], position);
@@ -114,7 +119,7 @@ float3 ShadeToon(float3 albedo, float3 normal, float3 position, float3 toViewer)
     {
         float3 halfVector = normalize(sunDirection + toViewer);
         float edge = 1.0 - toon.specularSize * 0.1;
-        float highlight = smoothstep(edge - 0.002, edge + 0.002, dot(normal, halfVector));
+        float highlight = smoothstep(edge - 0.002, edge + 0.002, dot(normal, halfVector)) * step(0.5, sunVisibility);
         color += toon.specularStrength * frame.sunIrradiance.rgb / Pi * highlight;
     }
 

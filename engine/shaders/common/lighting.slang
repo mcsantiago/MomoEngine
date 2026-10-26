@@ -32,6 +32,7 @@ struct ToonParams {
 // per frame.
 struct FrameUniforms {
     float4x4 inverseViewProjection; // NDC -> world
+    float4x4 sunViewProjection;     // World -> the shadow map's clip space
     float4 cameraPosition;  // xyz
     float4 sunDirection;    // xyz: unit vector toward the sun
     float4 sunIrradiance;   // rgb: light delivered to a surface facing the sun head-on
@@ -43,9 +44,9 @@ struct FrameUniforms {
     uint   shadingModel;    // ShadingLambert or ShadingToon (raster only)
     float  nearPlane;       // Of the perspective projection, to linearize depth
     float  farPlane;
-    float  padding0;
-    float  padding1;
-    float  padding2;
+    uint   shadowsEnabled;     // Raster only; the path tracer traces shadow rays
+    float  shadowNormalOffset; // World units to move a point along its normal before the lookup
+    float  shadowFilterRadius; // Shadow map texels between filter taps; larger = softer edges
     ToonParams toon;
 };
 [vk::binding(0, 1)] ConstantBuffer<FrameUniforms> frame;
@@ -56,6 +57,36 @@ struct PointLight {
     float4 intensity; // rgb: radiant intensity; a surface at distance d facing it receives intensity / d^2
 };
 [vk::binding(1, 1)] StructuredBuffer<PointLight> pointLights;
+
+// Depth of the scene seen from the sun (shadow.slang), sampled with a depth
+// comparison: 1 where the reference is no farther than the stored depth
+[vk::binding(2, 1)] Sampler2DShadow shadowMap;
+
+// Fraction of the sun reaching a point: 1 lit, 0 in shadow, in between at
+// shadow edges. Averages 3x3 comparisons (percentage-closer filtering), each
+// filtered bilinearly by the sampler. The point is first moved along its
+// normal by about a texel, so a surface doesn't shadow itself from depth
+// rounding ("shadow acne").
+float SunVisibility(float3 position, float3 normal)
+{
+    if (frame.shadowsEnabled == 0)
+        return 1.0;
+    float4 clip = mul(frame.sunViewProjection, float4(position + normal * frame.shadowNormalOffset, 1.0));
+    float3 ndc = clip.xyz / clip.w;
+    float2 uv = ndc.xy * 0.5 + 0.5;
+    // Outside the map: nothing there to cast a shadow
+    if (any(uv < 0.0) || any(uv > 1.0) || ndc.z > 1.0)
+        return 1.0;
+
+    uint width, height;
+    shadowMap.GetDimensions(width, height);
+    float2 tapSpacing = frame.shadowFilterRadius / float2(width, height);
+    float lit = 0.0;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++)
+            lit += shadowMap.SampleCmpLevelZero(uv + float2(x, y) * tapSpacing, ndc.z);
+    return lit / 9.0;
+}
 
 // Sunset-style gradient: the horizon color fading to the zenith color
 // overhead, and to the ground color below

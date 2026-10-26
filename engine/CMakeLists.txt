@@ -10,6 +10,7 @@ add_library(MomoEngine STATIC
   src/Renderer/VulkanRayTracing.cpp
   src/Renderer/VulkanLighting.cpp
   src/Renderer/VulkanUi.cpp
+  src/Renderer/VulkanShadows.cpp
   include/Momo/Renderer/Lighting.h
   include/Momo/Renderer/DescriptorAllocator.h
   src/Renderer/DescriptorAllocator.cpp
@@ -263,6 +264,7 @@ endfunction()
 set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/composite.slang)
+compile_slang_shader(${SHADER_SOURCE_DIR}/common/shadow.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang counters COUNT_TRAVERSAL)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang capture CAPTURE_RAYS)

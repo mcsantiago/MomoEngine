@@ -7,11 +7,12 @@ namespace Momo {
 namespace Renderer {
     void VulkanRenderer::CreateFrameResources()
     {
-        // Binding 0: FrameUniforms. 1: point lights.
+        // Binding 0: FrameUniforms. 1: point lights. 2: the sun's shadow map.
         constexpr vk::ShaderStageFlags stages = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment | vk::ShaderStageFlagBits::eCompute;
-        std::array<vk::DescriptorSetLayoutBinding, 2> bindings{
+        std::array<vk::DescriptorSetLayoutBinding, 3> bindings{
             vk::DescriptorSetLayoutBinding(0, vk::DescriptorType::eUniformBuffer, 1, stages),
             vk::DescriptorSetLayoutBinding(1, vk::DescriptorType::eStorageBuffer, 1, stages),
+            vk::DescriptorSetLayoutBinding(2, vk::DescriptorType::eCombinedImageSampler, 1, stages),
         };
         m_FrameSetLayout = vk::raii::DescriptorSetLayout(*m_Device, vk::DescriptorSetLayoutCreateInfo({}, bindings));
 
@@ -27,7 +28,7 @@ namespace Renderer {
             .sizes = {
                 { vk::DescriptorType::eUniformBuffer, MAX_FRAMES_IN_FLIGHT },
                 { vk::DescriptorType::eStorageBuffer, MAX_FRAMES_IN_FLIGHT },
-                { vk::DescriptorType::eCombinedImageSampler, 2 },
+                { vk::DescriptorType::eCombinedImageSampler, 2 + MAX_FRAMES_IN_FLIGHT },
             },
         });
 
@@ -47,6 +48,7 @@ namespace Renderer {
         samplerInfo.addressModeW = vk::SamplerAddressMode::eClampToEdge;
         m_NearestSampler = vk::raii::Sampler(*m_Device, samplerInfo);
 
+        CreateShadowMap();
         SetPointLights({});
     }
 
@@ -73,9 +75,11 @@ namespace Renderer {
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vk::DescriptorBufferInfo uniformInfo(*m_FrameUniformBuffers[i].buffer, 0, sizeof(FrameUniforms));
             vk::DescriptorBufferInfo lightInfo(*m_PointLightBuffer->buffer, 0, vk::WholeSize);
-            std::array<vk::WriteDescriptorSet, 2> writes{
+            vk::DescriptorImageInfo shadowInfo(**m_ShadowSampler, *m_ShadowMap->imageView, vk::ImageLayout::eShaderReadOnlyOptimal);
+            std::array<vk::WriteDescriptorSet, 3> writes{
                 vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 0, 0, vk::DescriptorType::eUniformBuffer, nullptr, uniformInfo),
                 vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 1, 0, vk::DescriptorType::eStorageBuffer, nullptr, lightInfo),
+                vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 2, 0, vk::DescriptorType::eCombinedImageSampler, shadowInfo),
             };
             m_Device->updateDescriptorSets(writes, nullptr);
         }
@@ -91,6 +95,7 @@ namespace Renderer {
         const ToonSettings& toon = m_Toon;
         FrameUniforms uniforms{
             .inverseViewProjection = glm::inverse(m_ProjectionMatrix * viewMatrix),
+            .sunViewProjection = SunViewProjection(),
             .cameraPosition = glm::vec4(glm::vec3(glm::inverse(viewMatrix)[3]), 1.0f),
             .sunDirection = glm::vec4(lighting.SunDirection(), 0.0f),
             .sunIrradiance = glm::vec4(lighting.sunColor * lighting.sunIntensity, 0.0f),
@@ -102,7 +107,10 @@ namespace Renderer {
             .shadingModel = static_cast<uint32_t>(mode == RenderMode::Toon ? ShadingModel::Toon : ShadingModel::Lambert),
             .nearPlane = NearPlane,
             .farPlane = FarPlane,
-            .padding = {},
+            // The path tracer traces its own shadows and never reads the map
+            .shadowsEnabled = lighting.shadows && mode != RenderMode::RayTraced ? 1u : 0u,
+            .shadowNormalOffset = lighting.shadowNormalBias * ShadowTexelWorldSize(),
+            .shadowFilterRadius = lighting.shadowSoftness,
             .toon = ToonUniforms{
                 .shadowTint = glm::vec4(toon.shadowTint, 0.0f),
                 .rimColor = glm::vec4(toon.rimColor, 0.0f),

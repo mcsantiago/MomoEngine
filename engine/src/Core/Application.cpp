@@ -5,6 +5,7 @@
 #include "Momo/Renderer/VulkanMeshData.h"
 #include "Momo/Renderer/VulkanRenderer.h"
 #include <chrono>
+#include <limits>
 #include <Momo/Logging/Logger.h>
 #include <glm/glm.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
@@ -81,6 +82,20 @@ namespace Momo
         m_ActiveScene->AddModel(handle);
         // Models have no transform of their own yet, so model space is world space
         m_Renderer.SetPointLights(m_AssetRegistry.Get(handle).pointLights);
+        glm::vec3 boundsMin(std::numeric_limits<float>::max());
+        glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
+        for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(handle).meshes)
+        {
+            const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
+            for (const Geometry::Vertex& vertex : mesh.meshData.vertices)
+            {
+                glm::vec3 position = glm::vec3(mesh.localTransform * glm::vec4(vertex.position, 1.0f));
+                boundsMin = glm::min(boundsMin, position);
+                boundsMax = glm::max(boundsMax, position);
+            }
+        }
+        if (boundsMin.x <= boundsMax.x)
+            m_Renderer.SetShadowBounds(boundsMin, boundsMax);
         StartRayTracingGeometryBuild();
     }
 
@@ -307,6 +322,10 @@ namespace Momo
             ImGui::ColorEdit3("Sky horizon", &light.skyHorizon.x);
             ImGui::ColorEdit3("Sky ground", &light.skyGround.x);
             ImGui::SliderFloat("Exposure", &light.exposure, 0.05f, 3.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SeparatorText("Sun shadows (raster and toon)");
+            ImGui::Checkbox("Shadows", &light.shadows);
+            ImGui::SliderFloat("Shadow softness", &light.shadowSoftness, 0.0f, 4.0f, "%.1f texels");
+            ImGui::SliderFloat("Shadow bias", &light.shadowNormalBias, 0.0f, 6.0f, "%.1f texels");
             if (ImGui::Button("Reset lighting"))
                 light = Renderer::SceneLighting{};
             ImGui::PopID();
