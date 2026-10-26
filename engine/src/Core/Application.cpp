@@ -414,12 +414,16 @@ namespace Momo
             ImGui::ColorEdit3("Sky horizon", &light.skyHorizon.x);
             ImGui::ColorEdit3("Sky ground", &light.skyGround.x);
             ImGui::SliderFloat("Exposure", &light.exposure, 0.05f, 3.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SeparatorText("Sun shadows (raster and toon)");
+            ImGui::SeparatorText("Shadows (raster and toon)");
             ImGui::Checkbox("Shadows", &light.shadows);
             ImGui::SliderFloat("Shadow softness", &light.shadowSoftness, 0.0f, 4.0f, "%.1f texels");
             ImGui::SliderFloat("Shadow bias", &light.shadowNormalBias, 0.0f, 6.0f, "%.1f texels");
             ImGui::Checkbox("Point light shadows", &light.pointShadows);
             ImGui::SliderFloat("Point shadow bias", &light.pointShadowBias, 0.0f, 6.0f, "%.1f texels");
+            ImGui::Checkbox("Ambient occlusion", &light.ambientOcclusion);
+            ImGui::SliderFloat("Occlusion radius", &light.occlusionRadius, 0.1f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Occlusion strength", &light.occlusionStrength, 0.25f, 4.0f, "%.2f");
+            ImGui::Checkbox("Show occlusion only", &light.showOcclusion);
             if (ImGui::Button("Reset lighting"))
                 light = Renderer::SceneLighting{};
             ImGui::PopID();

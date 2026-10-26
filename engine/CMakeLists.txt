@@ -11,6 +11,7 @@ add_library(MomoEngine STATIC
   src/Renderer/VulkanLighting.cpp
   src/Renderer/VulkanUi.cpp
   src/Renderer/VulkanShadows.cpp
+  src/Renderer/VulkanAmbientOcclusion.cpp
   include/Momo/Renderer/Lighting.h
   include/Momo/Renderer/DescriptorAllocator.h
   src/Renderer/DescriptorAllocator.cpp
@@ -194,7 +195,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -fvk-use-entrypoint-name
       -o ${VERT_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang ${SHADER_SOURCE_DIR}/common/surface.slang
     COMMENT "Compiling vertex shader: ${SHADER_NAME}.vert.spv"
     VERBATIM
   )
@@ -213,7 +214,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -fvk-use-entrypoint-name
       -o ${FRAG_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang ${SHADER_SOURCE_DIR}/common/surface.slang
     COMMENT "Compiling fragment shader: ${SHADER_NAME}.frag.spv"
     VERBATIM
   )
@@ -265,10 +266,13 @@ set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/composite.slang)
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/shadow.slang)
+compile_slang_shader(${SHADER_SOURCE_DIR}/common/prepass.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang counters COUNT_TRAVERSAL)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang capture CAPTURE_RAYS)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/traceonly.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/ssao.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/ssao.slang blur SSAO_BLUR)
 
 # Create custom target for all shaders
 add_custom_target(MomoShaders ALL

@@ -23,12 +23,6 @@ VertexOutput vertMain(uint vertexId : SV_VertexID)
     return output;
 }
 
-// Distance along the view direction, from a [0, 1] depth buffer value
-float LinearDepth(float depth)
-{
-    return frame.nearPlane * frame.farPlane / (frame.farPlane - depth * (frame.farPlane - frame.nearPlane));
-}
-
 // 1 if the pixel lies on an outline. Silhouettes: a neighbor is farther away
 // by more than depthThreshold (relative, so it holds at any distance); the
 // outline goes on the nearer pixel only, so it stays on the object. Creases:

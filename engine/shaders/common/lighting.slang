@@ -33,6 +33,7 @@ struct ToonParams {
 struct FrameUniforms {
     float4x4 inverseViewProjection; // NDC -> world
     float4x4 sunViewProjection;     // World -> the shadow map's clip space
+    float4x4 viewProjection;        // World -> the camera's clip space
     float4 cameraPosition;  // xyz
     float4 sunDirection;    // xyz: unit vector toward the sun
     float4 sunIrradiance;   // rgb: light delivered to a surface facing the sun head-on
@@ -51,6 +52,10 @@ struct FrameUniforms {
     float  pointShadowNear;    // Of every cube face's projection
     float  pointShadowFar;
     float  pointShadowBias;    // Cube map texels to move a point along its normal before the lookup
+    uint   occlusionEnabled;   // Raster only: ambientOcclusion holds this frame's occlusion
+    float  occlusionRadius;    // World units around a point searched for occluders
+    float  occlusionStrength;  // Exponent on the unoccluded fraction; higher is darker
+    uint   showOcclusion;      // Debug: the raster pass outputs the occlusion alone
     ToonParams toon;
 };
 [vk::binding(0, 1)] ConstantBuffer<FrameUniforms> frame;
@@ -97,6 +102,18 @@ float PointLightVisibility(uint index, float3 position, float3 normal)
     return pointShadowMaps[index].SampleCmpLevelZero(fromLight, depth);
 }
 
+// Screen-space ambient occlusion of the raster pass's pixels (ssao.slang):
+// 1 open sky, toward 0 in creases and corners
+[vk::binding(4, 1)] Sampler2D<float> ambientOcclusion;
+
+// Fraction of the sky light reaching the pixel at fragCoord (SV_Position.xy)
+float AmbientOcclusion(float2 fragCoord)
+{
+    if (frame.occlusionEnabled == 0)
+        return 1.0;
+    return ambientOcclusion.Load(int3(int2(fragCoord), 0));
+}
+
 // Fraction of the sun reaching a point: 1 lit, 0 in shadow, in between at
 // shadow edges. Averages 3x3 comparisons (percentage-closer filtering), each
 // filtered bilinearly by the sampler. The point is first moved along its
@@ -121,6 +138,13 @@ float SunVisibility(float3 position, float3 normal)
         for (int x = -1; x <= 1; x++)
             lit += shadowMap.SampleCmpLevelZero(uv + float2(x, y) * tapSpacing, ndc.z);
     return lit / 9.0;
+}
+
+// Distance along the view direction, from a [0, 1] value of the
+// camera's depth buffer
+float LinearDepth(float depth)
+{
+    return frame.nearPlane * frame.farPlane / (frame.farPlane - depth * (frame.farPlane - frame.nearPlane));
 }
 
 // Sunset-style gradient: the horizon color fading to the zenith color

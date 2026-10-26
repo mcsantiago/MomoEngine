@@ -26,6 +26,12 @@ struct SceneLighting
     float shadowNormalBias = 1.5f; // Shadow map texels to move a point along its normal before the lookup
     bool pointShadows = true;      // Cube shadow maps for the first few point lights
     float pointShadowBias = 1.5f;  // Cube map texels to move a point along its normal before the lookup
+    // Screen-space ambient occlusion of the sky light (raster modes; the
+    // path tracer's sky rays find occluders themselves)
+    bool ambientOcclusion = true;
+    float occlusionRadius = 1.0f;   // World units around a point searched for occluders
+    float occlusionStrength = 1.5f; // Exponent on the unoccluded fraction; higher is darker
+    bool showOcclusion = false;     // Debug: draw the occlusion alone
 
     // Unit vector toward the sun
     glm::vec3 SunDirection() const

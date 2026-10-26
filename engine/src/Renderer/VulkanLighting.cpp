@@ -8,13 +8,14 @@ namespace Renderer {
     void VulkanRenderer::CreateFrameResources()
     {
         // Binding 0: FrameUniforms. 1: point lights. 2: the sun's shadow map.
-        // 3: point lights' cube shadow maps.
+        // 3: point lights' cube shadow maps. 4: ambient occlusion.
         constexpr vk::ShaderStageFlags stages = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment | vk::ShaderStageFlagBits::eCompute;
-        std::array<vk::DescriptorSetLayoutBinding, 4> bindings{
+        std::array<vk::DescriptorSetLayoutBinding, 5> bindings{
             vk::DescriptorSetLayoutBinding(0, vk::DescriptorType::eUniformBuffer, 1, stages),
             vk::DescriptorSetLayoutBinding(1, vk::DescriptorType::eStorageBuffer, 1, stages),
             vk::DescriptorSetLayoutBinding(2, vk::DescriptorType::eCombinedImageSampler, 1, stages),
             vk::DescriptorSetLayoutBinding(3, vk::DescriptorType::eCombinedImageSampler, MaxShadowedPointLights, stages),
+            vk::DescriptorSetLayoutBinding(4, vk::DescriptorType::eCombinedImageSampler, 1, stages),
         };
         m_FrameSetLayout = vk::raii::DescriptorSetLayout(*m_Device, vk::DescriptorSetLayoutCreateInfo({}, bindings));
 
@@ -25,12 +26,21 @@ namespace Renderer {
         };
         m_CompositeSetLayout = vk::raii::DescriptorSetLayout(*m_Device, vk::DescriptorSetLayoutCreateInfo({}, compositeBindings));
 
+        // Ambient occlusion: the prepass's depth, and the occlusion before and after the blur
+        std::array<vk::DescriptorSetLayoutBinding, 3> occlusionBindings{
+            vk::DescriptorSetLayoutBinding(0, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eCompute),
+            vk::DescriptorSetLayoutBinding(1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute),
+            vk::DescriptorSetLayoutBinding(2, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute),
+        };
+        m_OcclusionSetLayout = vk::raii::DescriptorSetLayout(*m_Device, vk::DescriptorSetLayoutCreateInfo({}, occlusionBindings));
+
         m_FrameDescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
-            .maxSets = MAX_FRAMES_IN_FLIGHT + 1,
+            .maxSets = MAX_FRAMES_IN_FLIGHT + 2,
             .sizes = {
                 { vk::DescriptorType::eUniformBuffer, MAX_FRAMES_IN_FLIGHT },
                 { vk::DescriptorType::eStorageBuffer, MAX_FRAMES_IN_FLIGHT },
-                { vk::DescriptorType::eCombinedImageSampler, 2 + MAX_FRAMES_IN_FLIGHT * (1 + MaxShadowedPointLights) },
+                { vk::DescriptorType::eCombinedImageSampler, 3 + MAX_FRAMES_IN_FLIGHT * (2 + MaxShadowedPointLights) },
+                { vk::DescriptorType::eStorageImage, 2 },
             },
         });
 
@@ -44,6 +54,7 @@ namespace Renderer {
             m_FrameDescriptorSets[i] = m_FrameDescriptorAllocator.AllocateDescriptorSet(**m_FrameSetLayout);
         }
         m_CompositeDescriptorSet = m_FrameDescriptorAllocator.AllocateDescriptorSet(**m_CompositeSetLayout);
+        m_OcclusionDescriptorSet = m_FrameDescriptorAllocator.AllocateDescriptorSet(**m_OcclusionSetLayout);
 
         vk::SamplerCreateInfo samplerInfo{};
         samplerInfo.magFilter = vk::Filter::eNearest;
@@ -101,6 +112,7 @@ namespace Renderer {
         FrameUniforms uniforms{
             .inverseViewProjection = glm::inverse(m_ProjectionMatrix * viewMatrix),
             .sunViewProjection = SunViewProjection(),
+            .viewProjection = m_ProjectionMatrix * viewMatrix,
             .cameraPosition = glm::vec4(glm::vec3(glm::inverse(viewMatrix)[3]), 1.0f),
             .sunDirection = glm::vec4(lighting.SunDirection(), 0.0f),
             .sunIrradiance = glm::vec4(lighting.sunColor * lighting.sunIntensity, 0.0f),
@@ -120,6 +132,10 @@ namespace Renderer {
             .pointShadowNear = PointShadowNear,
             .pointShadowFar = m_PointShadowFar,
             .pointShadowBias = lighting.pointShadowBias,
+            .occlusionEnabled = lighting.ambientOcclusion && mode != RenderMode::RayTraced ? 1u : 0u,
+            .occlusionRadius = lighting.occlusionRadius,
+            .occlusionStrength = lighting.occlusionStrength,
+            .showOcclusion = lighting.showOcclusion && mode != RenderMode::RayTraced ? 1u : 0u,
             .toon = ToonUniforms{
                 .shadowTint = glm::vec4(toon.shadowTint, 0.0f),
                 .rimColor = glm::vec4(toon.rimColor, 0.0f),

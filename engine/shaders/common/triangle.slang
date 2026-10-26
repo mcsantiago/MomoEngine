@@ -2,74 +2,23 @@
 // (lighting.slang), with shadows from shadow maps (the sun's and up to
 // MaxShadowedPointLights point lights') but no bounce light. frame.shadingModel picks
 // how a surface turns light into color: Lambert (matte, like the path
-// tracer's direct light) or toon. Also writes each pixel's normal for the
-// outlines in composite.slang.
+// tracer's direct light) or toon. Sky light is dimmed by screen-space ambient
+// occlusion (ssao.slang). Also writes each pixel's normal for the outlines in
+// composite.slang.
 
 #include "lighting.slang"
-
-struct VertexInput {
-    [vk::location(0)] float3 position : POSITION;
-    [vk::location(1)] float3 normal   : NORMAL;
-    [vk::location(2)] float2 texCoord : TEXCOORD;
-};
-
-[vk::binding(0, 0)] Sampler2D baseColorTexture;
-// Matches MaterialParams in VulkanMeshData.h
-struct MaterialParams {
-    float4 baseColorFactor;
-    float4 emissive; // rgb: light the surface gives off
-    float  alphaCutoff;
-};
-[vk::binding(1, 0)] ConstantBuffer<MaterialParams> material;
-
-struct VertexOutput {
-    float4 sv_position : SV_Position;
-    float3 worldPosition;
-    float3 worldNormal;
-    float2 texCoord;
-};
+#include "surface.slang"
 
 struct FragmentOutput {
     float4 color  : SV_Target0;
     float4 normal : SV_Target1; // xyz: world-space normal; a = 1 where geometry was drawn
 };
 
-struct PushConstants {
-    float4x4 projection;
-    float4x4 view;
-    float4x4 model;
-};
-[vk::push_constant] ConstantBuffer<PushConstants> pc;
-
-// Normals transform by the inverse transpose, so they stay perpendicular to
-// surfaces under non-uniform scale. The cofactor matrix is that up to a scale
-// factor, which normalizing removes: its columns are cross products of the
-// model's columns (where it sends each axis).
-float3 TransformNormal(float3x3 model, float3 normal)
+// Matte reflection of the sun, the point lights and the sky. occlusion: the
+// fraction of the sky the point sees (AmbientOcclusion)
+float3 ShadeLambert(float3 albedo, float3 normal, float3 position, float occlusion)
 {
-    float3 x = mul(model, float3(1.0, 0.0, 0.0));
-    float3 y = mul(model, float3(0.0, 1.0, 0.0));
-    float3 z = mul(model, float3(0.0, 0.0, 1.0));
-    // A mirroring transform (negative determinant) would flip it inside out
-    float handedness = dot(x, cross(y, z)) < 0.0 ? -1.0 : 1.0;
-    return handedness * (normal.x * cross(y, z) + normal.y * cross(z, x) + normal.z * cross(x, y));
-}
-
-[shader("vertex")]
-VertexOutput vertMain(VertexInput input) {
-    VertexOutput output;
-    float4 worldPosition = mul(pc.model, float4(input.position, 1.0));
-    output.sv_position = mul(mul(pc.projection, pc.view), worldPosition);
-    output.worldPosition = worldPosition.xyz;
-    output.worldNormal = TransformNormal((float3x3)pc.model, input.normal);
-    output.texCoord = input.texCoord;
-    return output;
-}
-
-// Matte reflection of the sun, the point lights and the sky
-float3 ShadeLambert(float3 albedo, float3 normal, float3 position)
-{
-    float3 light = SkyAmbient(normal);
+    float3 light = SkyAmbient(normal) * occlusion;
     float sunCosine = saturate(dot(normal, frame.sunDirection.xyz));
     if (sunCosine > 0.0)
         light += frame.sunIrradiance.rgb / Pi * sunCosine * SunVisibility(position, normal);
@@ -98,7 +47,7 @@ float Band(float cosine)
 
 // Banded lighting with a tinted shadow side, a hard specular highlight from
 // the sun and a rim along silhouettes
-float3 ShadeToon(float3 albedo, float3 normal, float3 position, float3 toViewer)
+float3 ShadeToon(float3 albedo, float3 normal, float3 position, float3 toViewer, float occlusion)
 {
     ToonParams toon = frame.toon;
     float3 sunDirection = frame.sunDirection.xyz;
@@ -107,7 +56,7 @@ float3 ShadeToon(float3 albedo, float3 normal, float3 position, float3 toViewer)
     // In shadow counts as facing away: the bands then give shadows the same
     // crisp edges as the light falling off around a curve
     float sunVisibility = sunCosine > 0.0 ? SunVisibility(position, normal) : 0.0;
-    float3 light = SkyAmbient(normal) * toon.shadowTint.rgb;
+    float3 light = SkyAmbient(normal) * toon.shadowTint.rgb * occlusion;
     light += frame.sunIrradiance.rgb / Pi * Band(sunCosine * sunVisibility);
     for (uint i = 0; i < frame.pointLightCount; i++)
     {
@@ -149,13 +98,14 @@ FragmentOutput fragMain(VertexOutput inVert, bool isFrontFace : SV_IsFrontFace)
         normal = -normal;
     float3 toViewer = normalize(frame.cameraPosition.xyz - inVert.worldPosition);
 
+    float occlusion = AmbientOcclusion(inVert.sv_position.xy);
     float3 color = frame.shadingModel == ShadingToon
-        ? ShadeToon(baseColor.rgb, normal, inVert.worldPosition, toViewer)
-        : ShadeLambert(baseColor.rgb, normal, inVert.worldPosition);
+        ? ShadeToon(baseColor.rgb, normal, inVert.worldPosition, toViewer, occlusion)
+        : ShadeLambert(baseColor.rgb, normal, inVert.worldPosition, occlusion);
     color += material.emissive.rgb;
 
     FragmentOutput output;
-    output.color = float4(Tonemap(color), 1.0);
+    output.color = frame.showOcclusion != 0 ? float4(occlusion.xxx, 1.0) : float4(Tonemap(color), 1.0);
     output.normal = float4(normal, 1.0);
     return output;
 }

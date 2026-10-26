@@ -203,6 +203,7 @@ namespace Renderer {
         CreateGraphicsPipeline();
         CreateCompositePipeline();
         CreateShadowPipeline();
+        CreateOcclusionPipelines();
         LOG_DEBUG("VulkanRenderer", "Checking ray tracing support...");
         CheckRayTracingSupport();
         if (m_RayTracingSupported) {
@@ -372,6 +373,12 @@ namespace Renderer {
             RecordShadowPass(modelData, modelMatrix);
         }
         RecordPointShadowPasses(modelData, modelMatrix);
+        // With the prepass, depth is already drawn and ready as an attachment
+        const bool depthPrepass = m_Lighting.ambientOcclusion;
+        if (depthPrepass) {
+            RecordDepthPrepass(modelData, viewMatrix, modelMatrix);
+            RecordOcclusionPass();
+        }
 
         vk::ImageMemoryBarrier2 toColorAttachment{};
         toColorAttachment.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
@@ -419,10 +426,12 @@ namespace Renderer {
         toNormalAttachment.image = *m_NormalBuffer->image;
         toNormalAttachment.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
 
+        std::vector<vk::ImageMemoryBarrier2> imageBarriers{ toColorAttachment, toNormalAttachment };
+        if (!depthPrepass) {
+            imageBarriers.push_back(toDepthAttachment);
+        }
         vk::DependencyInfo dependencyInfo{};
-        vk::ImageMemoryBarrier2 imageBarriers[] = { toColorAttachment, toDepthAttachment, toNormalAttachment };
-        dependencyInfo.imageMemoryBarrierCount = 3;
-        dependencyInfo.pImageMemoryBarriers = imageBarriers;
+        dependencyInfo.setImageMemoryBarriers(imageBarriers);
 
         m_CommandBuffers[m_CurrentFrame].pipelineBarrier2(dependencyInfo);
 
@@ -438,7 +447,7 @@ namespace Renderer {
         vk::RenderingAttachmentInfo depthAttachment{};
         depthAttachment.imageView = *m_DepthBuffer->imageView;
         depthAttachment.imageLayout = vk::ImageLayout::eDepthAttachmentOptimal;
-        depthAttachment.loadOp = vk::AttachmentLoadOp::eClear;
+        depthAttachment.loadOp = depthPrepass ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear;
         depthAttachment.storeOp = vk::AttachmentStoreOp::eStore;
         depthAttachment.clearValue = vk::ClearValue().setDepthStencil({1.0f, 0});
 
@@ -1101,7 +1110,7 @@ namespace Renderer {
             {},                          // flags
             VK_TRUE,                     // depthTestEnable
             VK_TRUE,                     // depthWriteEnable
-            vk::CompareOp::eLess,        // depthCompareOp
+            vk::CompareOp::eLessOrEqual, // depthCompareOp: equal passes the depth prepass's own values
             VK_FALSE,                    // depthBoundsTestEnable
             VK_FALSE                     // stencilTestEnable
         );
@@ -1221,6 +1230,7 @@ namespace Renderer {
         m_DepthBuffer = CreateDepthBuffer();
         m_NormalBuffer = CreateNormalBuffer();
         WriteCompositeDescriptorSet();
+        CreateOcclusionImages();
         m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), NearPlane, FarPlane);
         m_ProjectionMatrix[1][1] *= -1; // Invert Y for Vulkan's coordinate system
 

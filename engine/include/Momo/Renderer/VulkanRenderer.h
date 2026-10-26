@@ -73,6 +73,7 @@ struct FrameUniforms
 {
     glm::mat4 inverseViewProjection;
     glm::mat4 sunViewProjection;
+    glm::mat4 viewProjection;
     glm::vec4 cameraPosition;
     glm::vec4 sunDirection;
     glm::vec4 sunIrradiance;
@@ -91,9 +92,13 @@ struct FrameUniforms
     float     pointShadowNear;
     float     pointShadowFar;
     float     pointShadowBias;    // Cube map texels
+    uint32_t  occlusionEnabled;
+    float     occlusionRadius;    // World units
+    float     occlusionStrength;
+    uint32_t  showOcclusion;
     ToonUniforms toon;
 };
-static_assert(sizeof(FrameUniforms) == 368, "FrameUniforms must match lighting.slang");
+static_assert(sizeof(FrameUniforms) == 448, "FrameUniforms must match lighting.slang");
 
 // A point light as lighting.slang reads it (set 1 binding 1; std430)
 struct GpuPointLight
@@ -249,6 +254,12 @@ private:
     void DrawShadowCasters(const VulkanModelData& modelData, const glm::mat4& modelMatrix, const glm::mat4& viewProjection,
                            vk::ImageView target, uint32_t size);
     uint32_t PointShadowCount() const;
+    // Screen-space ambient occlusion (VulkanAmbientOcclusion.cpp): a depth
+    // prepass, then ssao.slang's occlusion and blur, which the raster pass reads
+    void CreateOcclusionPipelines();
+    void CreateOcclusionImages();
+    void RecordDepthPrepass(const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix);
+    void RecordOcclusionPass();
     // World -> the shadow map's clip space: an orthographic box around the
     // scene bounds, looking along the sun's direction
     glm::mat4 SunViewProjection() const;
@@ -399,6 +410,18 @@ private:
     float m_PointShadowFar = 100.0f;               // Reaches the whole scene from any of the lights
     glm::vec3 m_ShadowBoundsMin{ -1.0f };
     glm::vec3 m_ShadowBoundsMax{ 1.0f };
+
+    // Ambient occlusion: sized like the swapchain, shared by all frames in
+    // flight, and always in General layout
+    std::optional<vk::raii::Pipeline> m_DepthPrepassPipeline; // Uses the raster pass's pipeline layout
+    std::optional<vk::raii::DescriptorSetLayout> m_OcclusionSetLayout;
+    vk::DescriptorSet m_OcclusionDescriptorSet;
+    std::optional<vk::raii::PipelineLayout> m_OcclusionPipelineLayout;
+    std::optional<vk::raii::Pipeline> m_OcclusionPipeline;
+    std::optional<vk::raii::Pipeline> m_OcclusionBlurPipeline;
+    std::optional<AllocatedImage> m_RawOcclusion; // Before the blur
+    std::optional<AllocatedImage> m_Occlusion;
+    static constexpr vk::Format OcclusionFormat = vk::Format::eR32Sfloat;
 
     // Composite pass: reads the raster pass's depth and normals
     std::optional<AllocatedImage> m_NormalBuffer; // World-space normals; a = 0 where nothing was drawn
