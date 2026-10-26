@@ -33,6 +33,7 @@ struct TriangleShading {
 
 struct Material {
     float4 baseColorFactor;
+    float4 emissive;         // rgb: light the surface gives off; a unused
     float  alphaCutoff;      // -1 unless the material is alpha masked
     uint   baseColorTexture; // Index into baseColorTextures
     uint2  padding;

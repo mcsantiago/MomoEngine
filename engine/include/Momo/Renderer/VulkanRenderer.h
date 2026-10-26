@@ -43,7 +43,7 @@ struct RayTracingPushConstants
     uint32_t  frameIndex;            // Changes every ray traced frame; seeds the random numbers
     uint32_t  sampleCount;           // Samples in the running average including this frame; 1 = start over
     uint32_t  maxBounces;            // Bounces after the camera ray's first hit
-    uint32_t  padding = 0;
+    uint32_t  pointLightCount;       // Lights in the point light buffer (it always holds at least one entry)
 };
 static_assert(sizeof(RayTracingPushConstants) == 96, "RayTracingPushConstants must match raytrace.slang");
 
@@ -82,9 +82,11 @@ struct RayTracingSceneBuffers
     AllocatedBuffer positions;
     AllocatedBuffer shading;
     AllocatedBuffer materials;
+    AllocatedBuffer pointLights; // A zeroed placeholder entry when the scene has none
+    uint32_t pointLightCount;
     RayTracing::WideBvhStats stats;
     size_t triangleCount;
-    size_t gpuBytes; // All four buffers
+    size_t gpuBytes; // All five buffers
 };
 
 class VulkanRenderer

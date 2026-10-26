@@ -37,6 +37,7 @@ public:
             // Mirrors the raster path's MaterialParams (see MaterialGPUCache)
             m_Materials.push_back(RayTracingMaterial{
                 .baseColorFactor = material.baseColorFactor,
+                .emissive = glm::vec4(material.emissive, 0.0f),
                 .alphaCutoff = material.alphaMode == Assets::AlphaMode::Mask ? material.alphaCutoff : -1.0f,
                 .baseColorTexture = TextureIndexOf(m_Registry.Resolve(material.baseColorTextureHandle)),
             });
@@ -121,9 +122,18 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
     std::vector<TrianglePositions> positions;
     std::vector<TriangleShading> shading;
     MaterialTable materials(registry);
+    std::vector<RayTracingPointLight> pointLights;
 
     for (const Assets::ModelHandle& model : scene.GetModels())
     {
+        // Models have no transform of their own yet, so model space is world space
+        for (const Assets::PointLight& light : registry.Get(model).pointLights)
+        {
+            pointLights.push_back(RayTracingPointLight{
+                .position = glm::vec4(light.position, 1.0f),
+                .intensity = glm::vec4(light.intensity, 0.0f),
+            });
+        }
         for (const Assets::MeshHandle& meshHandle : registry.Get(model).meshes)
         {
             const Assets::Mesh& mesh = registry.Get(meshHandle);
@@ -139,6 +149,7 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
     geometry.shading = Reorder<TriangleShading>(shading, geometry.bvh.triangleOrder);
     geometry.materials = materials.TakeMaterials();
     geometry.textures = materials.TakeTextures();
+    geometry.pointLights = std::move(pointLights);
     return geometry;
 }
 

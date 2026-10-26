@@ -16,10 +16,18 @@ struct PushConstants {
     uint     frameIndex;            // Seeds the random numbers; changes every frame
     uint     sampleCount;           // Samples in the average including this one; 1 = start over
     uint     maxBounces;            // Bounces after the camera ray hits a surface; each adds
-                                    // a closest-hit ray and a shadow ray per pixel
-    uint     padding;
+                                    // a closest-hit ray and a shadow ray per pixel (plus one
+                                    // per point light)
+    uint     pointLightCount;       // Entries of pointLights in use
 };
 [vk::push_constant] ConstantBuffer<PushConstants> pc;
+
+// Matches RayTracing::RayTracingPointLight
+struct PointLight {
+    float4 position;  // w unused
+    float4 intensity; // rgb: radiant intensity; a surface at distance d facing it receives intensity / d^2
+};
+[vk::binding(11, 0)] StructuredBuffer<PointLight> pointLights;
 
 // The sun: direction toward it, and how much light it delivers to a surface
 // facing it head-on (irradiance; the sky's brightness is the reference)
@@ -91,6 +99,7 @@ struct Surface {
     float3 normal;     // Smoothed (interpolated) normal, facing the incoming ray
     float3 faceNormal; // Flat triangle normal, facing the incoming ray
     float3 albedo;     // Fraction of light reflected, per channel (the base color)
+    float3 emission;   // Light the surface gives off itself
 };
 
 Surface GetSurface(Ray ray, Hit hit)
@@ -112,7 +121,9 @@ Surface GetSurface(Ray ray, Hit hit)
     if (dot(surface.faceNormal, ray.direction) > 0.0)
         surface.faceNormal = -surface.faceNormal;
 
-    surface.albedo = SampleBaseColor(materials[triangle.materialIndex], InterpolateUV(triangle, hit)).rgb;
+    Material material = materials[triangle.materialIndex];
+    surface.albedo = SampleBaseColor(material, InterpolateUV(triangle, hit)).rgb;
+    surface.emission = material.emissive.rgb;
     return surface;
 }
 
@@ -128,6 +139,36 @@ float3 DirectSunlight(Surface surface)
         !SeesSun(OffsetFromSurface(surface.position, surface.faceNormal)))
         return float3(0.0);
     return surface.albedo / Pi * SunIrradiance * cosine;
+}
+
+// Light from every point light reflected toward the viewer, one shadow ray
+// each. Same matte reflection as the sun, but the light weakens with the
+// square of the distance.
+float3 DirectPointLights(Surface surface)
+{
+    float3 light = float3(0.0);
+    for (uint i = 0; i < pc.pointLightCount; i++)
+    {
+        PointLight pointLight = pointLights[i];
+        float3 toLight = pointLight.position.xyz - surface.position;
+        float distanceSquared = dot(toLight, toLight);
+        float distance = sqrt(distanceSquared);
+        float3 direction = toLight / distance;
+        float cosine = dot(surface.normal, direction);
+        if (cosine <= 0.0 || dot(surface.faceNormal, direction) <= 0.0)
+            continue;
+
+        Ray shadowRay;
+        shadowRay.origin = OffsetFromSurface(surface.position, surface.faceNormal);
+        shadowRay.direction = direction;
+        CAPTURE_RAY(shadowRay, true);
+        Hit unused;
+        // Stop just short of the light so nothing behind it counts as a blocker
+        if (IntersectScene(shadowRay, 0.0, distance * 0.999, true, unused))
+            continue;
+        light += surface.albedo / Pi * pointLight.intensity.rgb * cosine / distanceSquared;
+    }
+    return light;
 }
 
 // PCG hash (Jarzynski & Olano, "Hash Functions for GPU Rendering", 2020):
@@ -189,7 +230,7 @@ float3 TracePath(Ray ray, inout uint rngState)
         }
 
         Surface surface = GetSurface(ray, hit);
-        radiance += throughput * DirectSunlight(surface);
+        radiance += throughput * (surface.emission + DirectSunlight(surface) + DirectPointLights(surface));
         if (bounce == pc.maxBounces)
             break;
 
