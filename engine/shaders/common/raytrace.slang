@@ -30,16 +30,23 @@ struct PointLight {
 [vk::binding(11, 0)] StructuredBuffer<PointLight> pointLights;
 
 // The sun: direction toward it, and how much light it delivers to a surface
-// facing it head-on (irradiance; the sky's brightness is the reference)
-static const float3 lightDir = normalize(float3(0.5, 1.0, 0.3));
-static const float3 SunIrradiance = float3(1.0, 0.95, 0.85) * 8.0;
+// facing it head-on (irradiance; the sky's brightness is the reference).
+// A low, orange sunset sun about 20 degrees above the horizon.
+static const float3 lightDir = normalize(float3(0.7, 0.35, 0.6));
+static const float3 SunIrradiance = float3(1.0, 0.6, 0.3) * 6.0;
 static const float Pi = 3.14159265;
 // Scales the light before tonemapping; higher is brighter
-static const float Exposure = 1.0;
+static const float Exposure = 0.6;
+// Sunset sky: an orange glow at the horizon fading to dusky blue overhead,
+// and a dim warm ground below
+static const float3 SkyGround = float3(0.3, 0.2, 0.18);
+static const float3 SkyHorizon = float3(1.0, 0.55, 0.35);
+static const float3 SkyZenith = float3(0.3, 0.36, 0.65);
 float3 Sky(float3 direction)
 {
-    float height = saturate(direction.y * 0.5 + 0.5);
-    return lerp(float3(0.35, 0.35, 0.4), float3(0.55, 0.7, 0.95), height);
+    if (direction.y < 0.0)
+        return lerp(SkyHorizon, SkyGround, saturate(-direction.y * 4.0));
+    return lerp(SkyHorizon, SkyZenith, saturate(direction.y * 2.0));
 }
 
 #ifdef CAPTURE_RAYS
