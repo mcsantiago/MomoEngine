@@ -21,6 +21,7 @@ Material ToMaterial(const MaterialSource& source, const TextureHandle textureHan
     material.alphaMode = source.alphaMode;
     material.alphaCutoff = source.alphaCutoff;
     material.baseColorTextureHandle = textureHandle;
+    material.emissive = source.emissive;
     return material;
 }
 
@@ -110,6 +111,7 @@ ModelHandle AssetRegistry::RegisterModel(ModelSource&& source) {
         Mesh mesh = ToMesh(std::move(meshSource), materialHandle);
         model.meshes.push_back(m_MeshAssets.Add(std::move(mesh)));
     }
+    model.pointLights = std::move(source.pointLights);
 
     return m_ModelAssets.Add(std::move(model));
 }

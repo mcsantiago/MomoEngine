@@ -28,6 +28,7 @@ struct MaterialSource {
     std::optional<uint32_t> baseColorTexture;
     AlphaMode alphaMode = AlphaMode::Opaque;
     float alphaCutoff = 0.5f;
+    glm::vec3 emissive = glm::vec3(0.0f);
 };
 
 struct MeshSource {
@@ -44,5 +45,7 @@ struct ModelSource {
     std::vector<MeshSource> meshes;
     std::vector<MaterialSource> materials;
     std::vector<TextureSource> textures;
+    // In model space, like MeshSource::localTransform
+    std::vector<PointLight> pointLights;
 };
 } // namespace Momo::Assets
