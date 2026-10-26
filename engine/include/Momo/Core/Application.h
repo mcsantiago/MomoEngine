@@ -1,4 +1,5 @@
 #pragma once
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <utility>
@@ -21,6 +22,9 @@ namespace Momo
         std::string Name = "Untitled";
         WindowSpecification WindowSpec{};
         Renderer::RenderMode InitialRenderMode = Renderer::RenderMode::Raster; // Toggled at runtime with P
+        // glTF file to load, relative to the binary dir. Its first camera, if
+        // it has one, is where the view starts
+        std::filesystem::path ScenePath = "Assets/Models/Sponza/Sponza.gltf";
         // Set to run the ray tracing benchmark instead of interactive mode; the app exits when done
         std::optional<BenchmarkSpecification> Benchmark;
     };

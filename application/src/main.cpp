@@ -78,6 +78,18 @@ Momo::Renderer::RenderMode GetRenderModeFromEnvironment()
     return Momo::Renderer::RenderMode::Raster;
 }
 
+// --scene=<path.gltf|path.glb> picks the scene to load (default: Sponza)
+std::optional<std::filesystem::path> GetScenePathFromCommandLine(int argc, char** argv)
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strncmp(argv[i], "--scene=", 8) == 0 && argv[i][8] != '\0') {
+            return std::filesystem::path(argv[i] + 8);
+        }
+    }
+    return std::nullopt;
+}
+
 // MOMO_BENCHMARK=<results.json> runs the ray tracing benchmark and exits
 std::optional<Momo::BenchmarkSpecification> GetBenchmarkFromEnvironment()
 {
@@ -104,6 +116,9 @@ int main(int argc, char** argv)
     appSpec.WindowSpec.Height = 1080;
     appSpec.InitialRenderMode = GetRenderModeFromEnvironment();
     appSpec.Benchmark = GetBenchmarkFromEnvironment();
+    if (auto scenePath = GetScenePathFromCommandLine(argc, argv)) {
+        appSpec.ScenePath = *scenePath;
+    }
 
     Momo::Application app(appSpec);
     app.PushLayer<AppLayer>();

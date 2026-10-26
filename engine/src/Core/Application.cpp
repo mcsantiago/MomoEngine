@@ -22,13 +22,15 @@ namespace Momo
         if (m_Spec.Benchmark)
         {
             m_Benchmark.emplace(*m_Spec.Benchmark);
+            if (m_Spec.ScenePath != ApplicationSpecification{}.ScenePath)
+                LOG_WARN("Momo", "Benchmark views are placed in Sponza; scene {} will be measured from them anyway", m_Spec.ScenePath.generic_string());
             m_RenderMode = Renderer::RenderMode::RayTraced;
         }
         m_Window = std::unique_ptr<IWindow>(IWindow::Create(m_Spec.WindowSpec));
         m_Renderer.Init(*m_Window);
         m_ModelLoader = std::unique_ptr<Assets::IModelLoader>(Assets::IModelLoader::CreateGltfModelLoader());
         m_AssetRegistry.Init();
-        LoadScene(""); // TODO: Replace with actual scene path
+        LoadScene(m_Spec.ScenePath);
     }
 
     Application::~Application()
@@ -44,10 +46,7 @@ namespace Momo
 
     void Application::LoadScene(const std::filesystem::path &path)
     {
-        // const std::filesystem::path modelPath = "Assets/Models/Duck/Duck.gltf";
-        // const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
-        // const std::filesystem::path modelPath = "Assets/Models/FlightHelmet/FlightHelmet.gltf";
-        const std::filesystem::path modelPath = "Assets/Models/Sponza/Sponza.gltf";
+        const std::filesystem::path& modelPath = path;
 
         if (!std::filesystem::exists(modelPath)) {
             LOG_ERROR("Momo", "Model file does not exist: {}", modelPath.generic_string());
@@ -59,10 +58,15 @@ namespace Momo
             LOG_ERROR("Momo", "Failed to load model from path: {}", modelPath.generic_string());
             return;
         }
+        // Models have no transform of their own yet, so the camera's model space is world space
+        if (modelSource->camera.has_value()) {
+            m_Camera = Camera::LookingAlong(modelSource->camera->position, glm::vec3(0.0f, 1.0f, 0.0f), modelSource->camera->forward);
+        } else {
+            m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
+        }
         Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
         m_ActiveScene->AddModel(handle);
         StartRayTracingGeometryBuild();
-        m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
     }
 
     // The BVH build takes seconds in debug builds. Running it on the main

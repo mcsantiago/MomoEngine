@@ -38,6 +38,12 @@ struct MeshSource {
     std::optional<uint32_t> materialIndex;
 };
 
+// A camera placed in the model (the first one in the file)
+struct CameraSource {
+    glm::vec3 position;
+    glm::vec3 forward; // Unit length
+};
+
 struct ModelSource {
     // meshes is one entry per drawn primitive; materials and textures are flat
     // file-level tables whose indices match the glTF material / image lists, so
@@ -47,5 +53,6 @@ struct ModelSource {
     std::vector<TextureSource> textures;
     // In model space, like MeshSource::localTransform
     std::vector<PointLight> pointLights;
+    std::optional<CameraSource> camera;
 };
 } // namespace Momo::Assets

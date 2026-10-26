@@ -1,11 +1,19 @@
 #include "Momo/Renderer/Camera.h"
 #include "Momo/Logging/Logger.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>
 
 namespace Momo {
 Camera::Camera(glm::vec3 position, glm::vec3 up, float yaw, float pitch)
     : m_Position(position), m_WorldUp(up), m_Yaw(yaw), m_Pitch(pitch), m_Front(glm::vec3(0.0f, 0.0f, -1.0f)), m_FirstMouse(true) {
     UpdateCameraVectors(0, 0);
+}
+
+Camera Camera::LookingAlong(glm::vec3 position, glm::vec3 up, glm::vec3 forward) {
+    // Inverts UpdateCameraVectors: front = (cos(yaw) cos(pitch), sin(pitch), sin(yaw) cos(pitch))
+    float pitch = glm::degrees(std::asin(glm::clamp(forward.y, -1.0f, 1.0f)));
+    float yaw = glm::degrees(std::atan2(forward.z, forward.x));
+    return Camera(position, up, yaw, pitch);
 }
 
 void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
