@@ -541,21 +541,39 @@ def build_props(coll):
         cylinder(f"Pot{i}", (x, WALL_FRONT_Y - 0.7, 0.4), 0.45, 0.8, terracotta, coll)
         ellipsoid(f"Shrub{i}", (x, WALL_FRONT_Y - 0.7, 1.35), (0.6, 0.6, 0.75), foliage, coll, segments=16)
 
-    # Street lamp at the curb: a glowing head, and a point light just under it
-    # (inside the closed head its own walls would block every shadow ray)
+    build_street_lamp(coll)
+
+
+def build_street_lamp(coll):
+    """Street lamp at the curb: a glowing head, and a point light hanging in
+    an open gap under it. Anything enclosing the light would block all of it
+    (the head's own walls, or the pole if it reached the head), so the pole
+    narrows to a point below the light and four thin brackets hold the head."""
     iron = material("Iron", None)
     lamp = material("LampGlass", LAMP_COLOR, roughness=0.3)
     glow = lamp.node_tree.nodes["Principled BSDF"]
     glow.inputs["Emission Color"].default_value = (*LAMP_COLOR, 1.0)
     glow.inputs["Emission Strength"].default_value = LAMP_GLOW
     lx, ly = 9.5, SIDEWALK_FRONT_Y + 0.8
+    pole_top, light_z, head_bottom = 6.7, 7.15, 7.3
     cylinder("LampBase", (lx, ly, 0.3), 0.3, 0.6, iron, coll)
-    cylinder("LampPole", (lx, ly, 3.8), 0.1, 7.0, iron, coll, segments=16)
-    box("LampHead", (lx - 0.35, ly - 0.35, 7.3), (lx + 0.35, ly + 0.35, 8.2), lamp, coll)
+    cylinder("LampPole", (lx, ly, (0.3 + pole_top) / 2), 0.1, pole_top - 0.3, iron, coll, segments=16)
+    # Narrow below the light, so the pole only shadows the ground near its base
+    bm = bmesh.new()
+    bmesh.ops.create_cone(bm, cap_ends=True, segments=16, radius1=0.1, radius2=0.02, depth=0.25)
+    finial = mesh_object("LampFinial", bm, iron, coll)
+    finial.location = (lx, ly, pole_top + 0.125)
+    tip = Vector((lx, ly, pole_top + 0.25))
+    for i, (dx, dy) in enumerate(((-1, -1), (1, -1), (1, 1), (-1, 1))):
+        corner = Vector((lx + dx * 0.3, ly + dy * 0.3, head_bottom))
+        direction = corner - tip
+        cylinder(f"LampBracket{i}", (tip + corner) / 2, 0.012, direction.length, iron, coll,
+                 rotation=direction.to_track_quat("Z", "Y").to_euler(), segments=6)
+    box("LampHead", (lx - 0.35, ly - 0.35, head_bottom), (lx + 0.35, ly + 0.35, 8.2), lamp, coll)
     box("LampCap", (lx - 0.5, ly - 0.5, 8.2), (lx + 0.5, ly + 0.5, 8.4), iron, coll)
     light = bpy.data.objects.new("LampLight", bpy.data.lights.new("LampLight", "POINT"))
     coll.objects.link(light)
-    light.location = (lx, ly, 7.15)
+    light.location = (lx, ly, light_z)
     light.data.color = LAMP_COLOR
     light.data.energy = LAMP_POWER
     light.data.shadow_soft_size = 0.0  # The engine's point lights have no size
@@ -828,4 +846,5 @@ def main():
     print(f"Saved {OUT_BLEND}")
 
 
-main()
+if __name__ == "__main__":
+    main()
