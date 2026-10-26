@@ -21,7 +21,7 @@ namespace Momo
     {
         std::string Name = "Untitled";
         WindowSpecification WindowSpec{};
-        Renderer::RenderMode InitialRenderMode = Renderer::RenderMode::Raster; // Toggled at runtime with P
+        Renderer::RenderMode InitialRenderMode = Renderer::RenderMode::Raster; // Cycled at runtime with P
         // glTF file to load, relative to the binary dir. Its first camera, if
         // it has one, is where the view starts
         std::filesystem::path ScenePath = "Assets/Models/Sponza/Sponza.gltf";

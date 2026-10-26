@@ -8,6 +8,8 @@ add_library(MomoEngine STATIC
   src/Platform/GLFW/WindowVulkan.cpp
   src/Renderer/VulkanRenderer.cpp
   src/Renderer/VulkanRayTracing.cpp
+  src/Renderer/VulkanLighting.cpp
+  include/Momo/Renderer/Lighting.h
   include/Momo/Renderer/DescriptorAllocator.h
   src/Renderer/DescriptorAllocator.cpp
   include/Momo/Renderer/Camera.h
@@ -169,7 +171,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -fvk-use-entrypoint-name
       -o ${VERT_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE}
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang
     COMMENT "Compiling vertex shader: ${SHADER_NAME}.vert.spv"
     VERBATIM
   )
@@ -188,7 +190,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -fvk-use-entrypoint-name
       -o ${FRAG_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE}
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang
     COMMENT "Compiling fragment shader: ${SHADER_NAME}.frag.spv"
     VERBATIM
   )
@@ -227,7 +229,7 @@ function(compile_slang_compute_shader SHADER_SOURCE)
       ${DEFINE_ARG}
       -o ${COMP_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/raytrace_traversal.slang
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/raytrace_traversal.slang ${SHADER_SOURCE_DIR}/common/lighting.slang
     COMMENT "Compiling compute shader: ${OUTPUT_NAME}"
     VERBATIM
   )
@@ -235,9 +237,10 @@ function(compile_slang_compute_shader SHADER_SOURCE)
   set(COMPILED_SHADERS ${COMPILED_SHADERS} ${COMP_OUTPUT} PARENT_SCOPE)
 endfunction()
 
-# Compile triangle.slang and raytrace.slang
+# Compile the raster, composite and ray tracing shaders
 set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
+compile_slang_shader(${SHADER_SOURCE_DIR}/common/composite.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang counters COUNT_TRAVERSAL)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang capture CAPTURE_RAYS)

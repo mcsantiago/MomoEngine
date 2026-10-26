@@ -66,6 +66,8 @@ namespace Momo
         }
         Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
         m_ActiveScene->AddModel(handle);
+        // Models have no transform of their own yet, so model space is world space
+        m_Renderer.SetPointLights(m_AssetRegistry.Get(handle).pointLights);
         StartRayTracingGeometryBuild();
     }
 
@@ -142,18 +144,29 @@ namespace Momo
             bool toggleRenderMode = m_InputState.keys.IsKeyPressed(Input::Key::P);
             if (toggleRenderMode && !m_ToggleRenderModeHeld && !m_Benchmark)
             {
-                if (m_RenderMode == Renderer::RenderMode::Raster && !m_Renderer.IsRayTracingAvailable())
+                // Raster -> toon -> ray traced -> raster
+                switch (m_RenderMode)
                 {
-                    if (m_PendingRayTracingGeometry.valid())
-                        LOG_INFO("Momo", "Ray tracing geometry is still building; staying in raster mode.");
+                case Renderer::RenderMode::Raster:
+                    m_RenderMode = Renderer::RenderMode::Toon;
+                    break;
+                case Renderer::RenderMode::Toon:
+                    if (m_Renderer.IsRayTracingAvailable())
+                        m_RenderMode = Renderer::RenderMode::RayTraced;
                     else
-                        LOG_WARN("Momo", "Ray tracing is unavailable; staying in raster mode.");
+                    {
+                        if (m_PendingRayTracingGeometry.valid())
+                            LOG_INFO("Momo", "Ray tracing geometry is still building; skipping ray traced mode.");
+                        else
+                            LOG_WARN("Momo", "Ray tracing is unavailable; skipping ray traced mode.");
+                        m_RenderMode = Renderer::RenderMode::Raster;
+                    }
+                    break;
+                case Renderer::RenderMode::RayTraced:
+                    m_RenderMode = Renderer::RenderMode::Raster;
+                    break;
                 }
-                else
-                {
-                    m_RenderMode = m_RenderMode == Renderer::RenderMode::Raster ? Renderer::RenderMode::RayTraced : Renderer::RenderMode::Raster;
-                    LOG_INFO("Momo", "Render mode: {}", m_RenderMode == Renderer::RenderMode::RayTraced ? "ray traced" : "raster");
-                }
+                LOG_INFO("Momo", "Render mode: {}", Renderer::RenderModeName(m_RenderMode));
             }
             m_ToggleRenderModeHeld = toggleRenderMode;
 

@@ -68,8 +68,9 @@ namespace Renderer {
         // 6: accumulation image (running average across frames).
         // 7: traversal counters (only read by the counting shader variant).
         // 8-10: captured rays, their counts per queue, and trace-only hits
-        // (only used by the trace-only experiment). 11: point lights.
-        std::array<vk::DescriptorSetLayoutBinding, 12> bindings{};
+        // (only used by the trace-only experiment). The lights are in the
+        // frame set (set 1), shared with the raster pass.
+        std::array<vk::DescriptorSetLayoutBinding, 11> bindings{};
         for (uint32_t i = 0; i < bindings.size(); i++) {
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
@@ -87,14 +88,15 @@ namespace Renderer {
         m_RayTracingDescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
             .maxSets = 1,
             .sizes = {
-                { vk::DescriptorType::eStorageBuffer, 9 },
+                { vk::DescriptorType::eStorageBuffer, 8 },
                 { vk::DescriptorType::eStorageImage, 2 },
                 { vk::DescriptorType::eCombinedImageSampler, RayTracing::MaxRayTracingTextures },
             },
         });
 
         vk::PushConstantRange pushConstantRange(vk::ShaderStageFlagBits::eCompute, 0, sizeof(RayTracingPushConstants));
-        vk::PipelineLayoutCreateInfo pipelineLayoutInfo({}, **m_RayTracingSetLayout, pushConstantRange);
+        std::array<vk::DescriptorSetLayout, 2> setLayouts{ **m_RayTracingSetLayout, **m_FrameSetLayout };
+        vk::PipelineLayoutCreateInfo pipelineLayoutInfo({}, setLayouts, pushConstantRange);
         m_RayTracingPipelineLayout = vk::raii::PipelineLayout(*m_Device, pipelineLayoutInfo);
 
         auto createPipeline = [this](const std::string& shaderPath, vk::PipelineLayout layout) {
@@ -229,20 +231,12 @@ namespace Renderer {
         size_t totalBytes = sizeof(RayTracing::CompressedWideNode) * geometry.bvh.nodes.size()
                           + sizeof(RayTracing::TrianglePositions) * geometry.positions.size()
                           + sizeof(RayTracing::TriangleShading) * geometry.shading.size()
-                          + sizeof(RayTracing::RayTracingMaterial) * geometry.materials.size()
-                          + sizeof(RayTracing::RayTracingPointLight) * geometry.pointLights.size();
-        // A storage buffer can't be empty; the shader reads only pointLightCount entries
-        std::vector<RayTracing::RayTracingPointLight> pointLights = geometry.pointLights;
-        if (pointLights.empty()) {
-            pointLights.push_back(RayTracing::RayTracingPointLight{});
-        }
+                          + sizeof(RayTracing::RayTracingMaterial) * geometry.materials.size();
         m_RayTracingScene.emplace(RayTracingSceneBuffers{
             .nodes = upload(geometry.bvh.nodes),
             .positions = upload(geometry.positions),
             .shading = upload(geometry.shading),
             .materials = upload(geometry.materials),
-            .pointLights = upload(pointLights),
-            .pointLightCount = static_cast<uint32_t>(geometry.pointLights.size()),
             .stats = geometry.bvh.stats,
             .triangleCount = geometry.positions.size(),
             .gpuBytes = totalBytes,
@@ -255,8 +249,8 @@ namespace Renderer {
         }
         WriteRayTracingDescriptorSet();
 
-        LOG_INFO("VulkanRenderer", "Uploaded ray tracing scene: {} triangles, {} materials, {} textures, {} point lights, {:.1f} MB",
-                 geometry.positions.size(), geometry.materials.size(), geometry.textures.size(), geometry.pointLights.size(),
+        LOG_INFO("VulkanRenderer", "Uploaded ray tracing scene: {} triangles, {} materials, {} textures, {:.1f} MB",
+                 geometry.positions.size(), geometry.materials.size(), geometry.textures.size(),
                  totalBytes / (1024.0 * 1024.0));
     }
 
@@ -283,9 +277,8 @@ namespace Renderer {
         }
 
         vk::DescriptorBufferInfo counterInfo(*m_TraversalCounterBuffer->buffer, 0, vk::WholeSize);
-        vk::DescriptorBufferInfo pointLightInfo(*m_RayTracingScene->pointLights.buffer, 0, vk::WholeSize);
 
-        std::array<vk::WriteDescriptorSet, 9> writes{};
+        std::array<vk::WriteDescriptorSet, 8> writes{};
         for (uint32_t i = 0; i < bufferInfos.size(); i++) {
             writes[i] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, i, 0, vk::DescriptorType::eStorageBuffer, nullptr, bufferInfos[i]);
         }
@@ -293,7 +286,6 @@ namespace Renderer {
         writes[5] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 5, 0, vk::DescriptorType::eCombinedImageSampler, textureInfos);
         writes[6] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 6, 0, vk::DescriptorType::eStorageImage, accumulationInfo);
         writes[7] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 7, 0, vk::DescriptorType::eStorageBuffer, nullptr, counterInfo);
-        writes[8] = vk::WriteDescriptorSet(m_RayTracingDescriptorSet, 11, 0, vk::DescriptorType::eStorageBuffer, nullptr, pointLightInfo);
         m_Device->updateDescriptorSets(writes, nullptr);
     }
 
@@ -499,11 +491,12 @@ namespace Renderer {
         auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
         const vk::ImageSubresourceRange colorRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
 
-        // Keep averaging while the camera holds still; any change (moving,
-        // turning, resizing) makes the old samples wrong, so start over
+        // Keep averaging while the camera and lighting hold still; any change
+        // (moving, turning, resizing, a lighting slider) makes the old samples wrong, so start over
         glm::mat4 viewProjection = m_ProjectionMatrix * viewMatrix;
-        if (viewProjection != m_AccumulationViewProjection) {
+        if (viewProjection != m_AccumulationViewProjection || m_Lighting != m_AccumulationLighting) {
             m_AccumulationViewProjection = viewProjection;
+            m_AccumulationLighting = m_Lighting;
             m_AccumulatedSamples = 0;
         }
         bool restartAccumulation = m_AccumulatedSamples == 0;
@@ -547,12 +540,12 @@ namespace Renderer {
             .frameIndex = m_RayTracingFrameIndex++,
             .sampleCount = m_AccumulatedSamples,
             .maxBounces = m_RayTracingMaxBounces,
-            .pointLightCount = m_RayTracingScene ? m_RayTracingScene->pointLightCount : 0,
         };
         const vk::raii::Pipeline& pipeline = m_CaptureRays ? *m_RayTracingCapturePipeline
                                            : m_CountTraversal ? *m_RayTracingCountingPipeline : *m_RayTracingPipeline;
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **m_RayTracingPipelineLayout, 0, m_RayTracingDescriptorSet, nullptr);
+        std::array<vk::DescriptorSet, 2> descriptorSets{ m_RayTracingDescriptorSet, m_FrameDescriptorSets[m_CurrentFrame] };
+        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **m_RayTracingPipelineLayout, 0, descriptorSets, nullptr);
         commandBuffer.pushConstants<RayTracingPushConstants>(**m_RayTracingPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, pushConstants);
         // Time the dispatch alone, for benchmarks. Each timestamp is written once
         // all earlier compute work in this command buffer has finished.

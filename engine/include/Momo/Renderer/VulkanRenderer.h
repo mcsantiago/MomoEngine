@@ -15,6 +15,7 @@
 #include "Momo/Renderer/DescriptorAllocator.h"
 #include "Momo/Profiling/Timer.h"
 #include "Momo/RayTracing/SceneGeometry.h"
+#include "Momo/Renderer/Lighting.h"
 
 namespace Momo {
 namespace Renderer {
@@ -31,9 +32,68 @@ struct DrawFrameTime
 
 enum class RenderMode
 {
-    Raster,
-    RayTraced
+    Raster,    // Rasterized, Lambert shading; no shadows or bounce light
+    Toon,      // Rasterized, toon shading with outlines
+    RayTraced  // Path traced
 };
+
+inline const char* RenderModeName(RenderMode mode)
+{
+    switch (mode)
+    {
+    case RenderMode::Raster: return "raster";
+    case RenderMode::Toon: return "toon";
+    case RenderMode::RayTraced: return "ray traced";
+    }
+    return "unknown";
+}
+
+// Toon shading parameters as lighting.slang reads them (std140)
+struct ToonUniforms
+{
+    glm::vec4 shadowTint;
+    glm::vec4 rimColor;
+    glm::vec4 outlineColor;
+    uint32_t  bands;
+    float     bandSoftness;
+    float     specularStrength;
+    float     specularSize;
+    float     rimStrength;
+    float     rimWidth;
+    float     outlineWidth;
+    float     depthThreshold;
+    float     normalThreshold;
+    float     padding[3];
+};
+static_assert(sizeof(ToonUniforms) == 96, "ToonUniforms must match ToonParams in lighting.slang");
+
+// Per-frame uniforms of every pipeline (lighting.slang, set 1 binding 0; std140)
+struct FrameUniforms
+{
+    glm::mat4 inverseViewProjection;
+    glm::vec4 cameraPosition;
+    glm::vec4 sunDirection;
+    glm::vec4 sunIrradiance;
+    glm::vec4 skyGround;
+    glm::vec4 skyHorizon;
+    glm::vec4 skyZenith;
+    float     exposure;
+    uint32_t  pointLightCount;
+    uint32_t  shadingModel; // ShadingModel
+    float     nearPlane;
+    float     farPlane;
+    float     padding[3];
+    ToonUniforms toon;
+};
+static_assert(sizeof(FrameUniforms) == 288, "FrameUniforms must match lighting.slang");
+
+// A point light as lighting.slang reads it (set 1 binding 1; std430)
+struct GpuPointLight
+{
+    glm::vec4 position;  // w unused
+    glm::vec4 intensity; // rgb: radiant intensity (see Assets::PointLight); a unused
+};
+static_assert(sizeof(GpuPointLight) == 32, "GpuPointLight must match lighting.slang");
 
 // Push constants of raytrace.slang (std430-compatible; at most the guaranteed 128 bytes)
 struct RayTracingPushConstants
@@ -43,7 +103,7 @@ struct RayTracingPushConstants
     uint32_t  frameIndex;            // Changes every ray traced frame; seeds the random numbers
     uint32_t  sampleCount;           // Samples in the running average including this frame; 1 = start over
     uint32_t  maxBounces;            // Bounces after the camera ray's first hit
-    uint32_t  pointLightCount;       // Lights in the point light buffer (it always holds at least one entry)
+    uint32_t  padding;
 };
 static_assert(sizeof(RayTracingPushConstants) == 96, "RayTracingPushConstants must match raytrace.slang");
 
@@ -82,11 +142,9 @@ struct RayTracingSceneBuffers
     AllocatedBuffer positions;
     AllocatedBuffer shading;
     AllocatedBuffer materials;
-    AllocatedBuffer pointLights; // A zeroed placeholder entry when the scene has none
-    uint32_t pointLightCount;
     RayTracing::WideBvhStats stats;
     size_t triangleCount;
-    size_t gpuBytes; // All five buffers
+    size_t gpuBytes; // All four buffers
 };
 
 class VulkanRenderer
@@ -104,6 +162,11 @@ public:
     // textureViews[i] is the GPU image of geometry.textures[i]; the caller keeps
     // the images alive while the scene is in use. Replaces any previous scene.
     void UploadRayTracingScene(RayTracing::SceneGeometry geometry, std::vector<vk::ImageView> textureViews);
+    // The scene's point lights, in world space, for every render path. Replaces any previous ones.
+    void SetPointLights(const std::vector<Assets::PointLight>& lights);
+    // Used from the next frame on
+    void SetLighting(const SceneLighting& lighting) { m_Lighting = lighting; }
+    void SetToonSettings(const ToonSettings& toon) { m_Toon = toon; }
     // False if the device can't present a ray traced image or no scene was uploaded
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
     uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
@@ -153,6 +216,15 @@ private:
 
     void BeginFrame();
     void RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix);
+    // Sky behind the raster pass's geometry, and toon outlines over it (composite.slang)
+    void RecordCompositePass(uint32_t imageIndex);
+
+    // Lighting shared by every pipeline (VulkanLighting.cpp)
+    void CreateFrameResources();
+    void WriteFrameUniforms(const glm::mat4& viewMatrix, RenderMode mode);
+    void CreateCompositePipeline();
+    AllocatedImage CreateNormalBuffer();
+    void WriteCompositeDescriptorSet();
     void EndFrame(uint32_t imageIndex, RenderMode mode);
 
     // Ray tracing (VulkanRayTracing.cpp)
@@ -232,6 +304,30 @@ private:
     std::optional<vk::raii::Sampler> m_TextureSampler;
     std::optional<vk::raii::DescriptorSetLayout> m_DescriptorSetLayout;
 
+    // Lighting shared by every pipeline: set 1 of the raster, composite and
+    // ray tracing pipelines. One uniform buffer and set per frame in flight, so
+    // a frame's uniforms can be written while the previous frame still reads its own.
+    SceneLighting m_Lighting;
+    ToonSettings m_Toon;
+    std::optional<vk::raii::DescriptorSetLayout> m_FrameSetLayout;
+    DescriptorAllocator m_FrameDescriptorAllocator; // Also holds the composite set
+    std::array<vk::DescriptorSet, MAX_FRAMES_IN_FLIGHT> m_FrameDescriptorSets{};
+    std::vector<AllocatedBuffer> m_FrameUniformBuffers; // Host visible, mapped for the renderer's lifetime
+    std::array<void*, MAX_FRAMES_IN_FLIGHT> m_FrameUniformsMapped{};
+    std::optional<AllocatedBuffer> m_PointLightBuffer; // A zeroed placeholder entry when the scene has none
+    uint32_t m_PointLightCount = 0;
+    static constexpr float NearPlane = 0.1f;
+    static constexpr float FarPlane = 100.0f;
+
+    // Composite pass: reads the raster pass's depth and normals
+    std::optional<AllocatedImage> m_NormalBuffer; // World-space normals; a = 0 where nothing was drawn
+    static constexpr vk::Format NormalBufferFormat = vk::Format::eR16G16B16A16Sfloat;
+    std::optional<vk::raii::Sampler> m_NearestSampler;
+    std::optional<vk::raii::DescriptorSetLayout> m_CompositeSetLayout;
+    vk::DescriptorSet m_CompositeDescriptorSet;
+    std::optional<vk::raii::PipelineLayout> m_CompositePipelineLayout;
+    std::optional<vk::raii::Pipeline> m_CompositePipeline;
+
     // Ray tracing resources
     bool m_RayTracingSupported = false;
     bool m_SupportsNonUniformTextureIndexing = false; // Set at device creation
@@ -272,6 +368,7 @@ private:
     uint32_t m_RayTracingFrameIndex = 0;
     uint32_t m_RayTracingMaxBounces = 5;
     glm::mat4 m_AccumulationViewProjection{ 0.0f }; // Camera the running average was made with
+    SceneLighting m_AccumulationLighting;            // Lighting it was made with
 
     // Intended for use when setting up Vulkan validation layers in instance creation.
     std::vector<char const*> m_ValidationLayers = {

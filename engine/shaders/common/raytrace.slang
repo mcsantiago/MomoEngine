@@ -3,6 +3,7 @@
 // Ray traversal lives in raytrace_traversal.slang, shared with traceonly.slang.
 
 #include "raytrace_traversal.slang"
+#include "lighting.slang"
 
 [vk::binding(4, 0)] [format("rgba16f")] RWTexture2D<float4> outputImage;
 
@@ -18,36 +19,9 @@ struct PushConstants {
     uint     maxBounces;            // Bounces after the camera ray hits a surface; each adds
                                     // a closest-hit ray and a shadow ray per pixel (plus one
                                     // per point light)
-    uint     pointLightCount;       // Entries of pointLights in use
+    uint     padding;
 };
 [vk::push_constant] ConstantBuffer<PushConstants> pc;
-
-// Matches RayTracing::RayTracingPointLight
-struct PointLight {
-    float4 position;  // w unused
-    float4 intensity; // rgb: radiant intensity; a surface at distance d facing it receives intensity / d^2
-};
-[vk::binding(11, 0)] StructuredBuffer<PointLight> pointLights;
-
-// The sun: direction toward it, and how much light it delivers to a surface
-// facing it head-on (irradiance; the sky's brightness is the reference).
-// A low, orange sunset sun about 20 degrees above the horizon.
-static const float3 lightDir = normalize(float3(0.7, 0.35, 0.6));
-static const float3 SunIrradiance = float3(1.0, 0.6, 0.3) * 6.0;
-static const float Pi = 3.14159265;
-// Scales the light before tonemapping; higher is brighter
-static const float Exposure = 0.6;
-// Sunset sky: an orange glow at the horizon fading to dusky blue overhead,
-// and a dim warm ground below
-static const float3 SkyGround = float3(0.3, 0.2, 0.18);
-static const float3 SkyHorizon = float3(1.0, 0.55, 0.35);
-static const float3 SkyZenith = float3(0.3, 0.36, 0.65);
-float3 Sky(float3 direction)
-{
-    if (direction.y < 0.0)
-        return lerp(SkyHorizon, SkyGround, saturate(-direction.y * 4.0));
-    return lerp(SkyHorizon, SkyZenith, saturate(direction.y * 2.0));
-}
 
 #ifdef CAPTURE_RAYS
 static uint captureBounce; // Bounce of the path's current segment, for the queue choice
@@ -83,7 +57,7 @@ bool SeesSun(float3 origin)
 {
     Ray shadowRay;
     shadowRay.origin = origin;
-    shadowRay.direction = lightDir;
+    shadowRay.direction = frame.sunDirection.xyz;
     CAPTURE_RAY(shadowRay, true);
     Hit unused;
     return !IntersectScene(shadowRay, 0.0, Infinity, true, unused);
@@ -138,14 +112,15 @@ Surface GetSurface(Ray ray, Hit hit)
 // surface: albedo / pi * irradiance * cos(angle to the sun), if the sun is visible
 float3 DirectSunlight(Surface surface)
 {
-    float cosine = dot(surface.normal, lightDir);
+    float3 sunDirection = frame.sunDirection.xyz;
+    float cosine = dot(surface.normal, sunDirection);
     // A triangle whose flat side faces away from the sun shadows itself, even
     // if its smoothed normal still leans toward the sun. Otherwise trace a
     // shadow ray, but only if there's direct light to lose.
-    if (cosine <= 0.0 || dot(surface.faceNormal, lightDir) <= 0.0 ||
+    if (cosine <= 0.0 || dot(surface.faceNormal, sunDirection) <= 0.0 ||
         !SeesSun(OffsetFromSurface(surface.position, surface.faceNormal)))
         return float3(0.0);
-    return surface.albedo / Pi * SunIrradiance * cosine;
+    return surface.albedo / Pi * frame.sunIrradiance.rgb * cosine;
 }
 
 // Light from every point light reflected toward the viewer, one shadow ray
@@ -154,26 +129,22 @@ float3 DirectSunlight(Surface surface)
 float3 DirectPointLights(Surface surface)
 {
     float3 light = float3(0.0);
-    for (uint i = 0; i < pc.pointLightCount; i++)
+    for (uint i = 0; i < frame.pointLightCount; i++)
     {
-        PointLight pointLight = pointLights[i];
-        float3 toLight = pointLight.position.xyz - surface.position;
-        float distanceSquared = dot(toLight, toLight);
-        float distance = sqrt(distanceSquared);
-        float3 direction = toLight / distance;
-        float cosine = dot(surface.normal, direction);
-        if (cosine <= 0.0 || dot(surface.faceNormal, direction) <= 0.0)
+        LightSample sample = SamplePointLight(pointLights[i], surface.position);
+        float cosine = dot(surface.normal, sample.direction);
+        if (cosine <= 0.0 || dot(surface.faceNormal, sample.direction) <= 0.0)
             continue;
 
         Ray shadowRay;
         shadowRay.origin = OffsetFromSurface(surface.position, surface.faceNormal);
-        shadowRay.direction = direction;
+        shadowRay.direction = sample.direction;
         CAPTURE_RAY(shadowRay, true);
         Hit unused;
         // Stop just short of the light so nothing behind it counts as a blocker
-        if (IntersectScene(shadowRay, 0.0, distance * 0.999, true, unused))
+        if (IntersectScene(shadowRay, 0.0, sample.distance * 0.999, true, unused))
             continue;
-        light += surface.albedo / Pi * pointLight.intensity.rgb * cosine / distanceSquared;
+        light += surface.albedo / Pi * sample.irradiance * cosine;
     }
     return light;
 }
@@ -250,14 +221,6 @@ float3 TracePath(Ray ray, inout uint rngState)
         throughput *= surface.albedo;
     }
     return radiance;
-}
-
-// Maps unbounded light values into displayable 0-1, rolling off highlights
-// instead of clipping them (Narkowicz's fit of the ACES filmic curve)
-float3 Tonemap(float3 color)
-{
-    color *= Exposure;
-    return saturate((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14));
 }
 
 [shader("compute")]

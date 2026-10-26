@@ -12,10 +12,11 @@ namespace Renderer {
 struct alignas(16) MaterialParams
 {
     glm::vec4 baseColorFactor;
+    glm::vec4 emissive; // rgb: light the surface gives off; a unused
     float alphaCutoff;
     float _pad[3]; // Padding to make the struct size a multiple of 16 bytes
 };
-static_assert(sizeof(MaterialParams) == 32, "MaterialParams size must be 32 bytes");
+static_assert(sizeof(MaterialParams) == 48, "MaterialParams must match triangle.slang");
 
 struct PushConstantData
 {

@@ -184,6 +184,10 @@ namespace Renderer {
         PickPhysicalDevice();
         LOG_DEBUG("VulkanRenderer", "Creating logical device...");
         CreateLogicalDevice();
+        LOG_DEBUG("VulkanRenderer", "Creating command pool...");
+        CreateCommandPool();
+        LOG_DEBUG("VulkanRenderer", "Creating frame lighting resources...");
+        CreateFrameResources();
         LOG_DEBUG("VulkanRenderer", "Checking timestamp support...");
         CheckTimestampSupport();        // TODO: Maybe this should be checked only if GPU timing is enabled in the config
         LOG_DEBUG("VulkanRenderer", "Createing timestamp query pool...");
@@ -196,14 +200,13 @@ namespace Renderer {
         CreateDescriptorSetLayout();
         LOG_DEBUG("VulkanRenderer", "Creating graphics pipeline...");
         CreateGraphicsPipeline();
+        CreateCompositePipeline();
         LOG_DEBUG("VulkanRenderer", "Checking ray tracing support...");
         CheckRayTracingSupport();
         if (m_RayTracingSupported) {
             CreateRayTracingPipeline();
             CreateRayTracingImages();
         }
-        LOG_DEBUG("VulkanRenderer", "Creating command pool...");
-        CreateCommandPool();
         LOG_DEBUG("VulkanRenderer", "Creating command buffers...");
         CreateCommandBuffers();
         LOG_DEBUG("VulkanRenderer", "Creating synchronization objects...");
@@ -308,6 +311,7 @@ namespace Renderer {
         m_Device->waitIdle();
         m_DescriptorAllocator.Destroy();
         m_RayTracingDescriptorAllocator.Destroy();
+        m_FrameDescriptorAllocator.Destroy();
     }
 
     vk::raii::CommandBuffer VulkanRenderer::BeginSingleUseCommandBuffer()
@@ -375,8 +379,10 @@ namespace Renderer {
         };
 
         vk::ImageMemoryBarrier2 toDepthAttachment{};
-        // The depth buffer is shared by all frames in flight, so wait for the previous frame's depth writes
-        toDepthAttachment.srcStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests;
+        // The depth buffer is shared by all frames in flight, so wait for the
+        // previous frame's depth writes and the composite pass's reads
+        toDepthAttachment.srcStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests
+                                       | vk::PipelineStageFlagBits2::eFragmentShader;
         toDepthAttachment.srcAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
         toDepthAttachment.dstStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests;
         toDepthAttachment.dstAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
@@ -391,9 +397,20 @@ namespace Renderer {
             1                                 // layerCount
         };
 
+        // Shared like the depth buffer; every pixel is cleared, so the old contents can go
+        vk::ImageMemoryBarrier2 toNormalAttachment{};
+        toNormalAttachment.srcStageMask = vk::PipelineStageFlagBits2::eFragmentShader;
+        toNormalAttachment.srcAccessMask = {};
+        toNormalAttachment.dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+        toNormalAttachment.dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+        toNormalAttachment.oldLayout = vk::ImageLayout::eUndefined;
+        toNormalAttachment.newLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        toNormalAttachment.image = *m_NormalBuffer->image;
+        toNormalAttachment.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
         vk::DependencyInfo dependencyInfo{};
-        dependencyInfo.imageMemoryBarrierCount = 2;
-        vk::ImageMemoryBarrier2 imageBarriers[] = { toColorAttachment, toDepthAttachment };
+        vk::ImageMemoryBarrier2 imageBarriers[] = { toColorAttachment, toDepthAttachment, toNormalAttachment };
+        dependencyInfo.imageMemoryBarrierCount = 3;
         dependencyInfo.pImageMemoryBarriers = imageBarriers;
 
         m_CommandBuffers[m_CurrentFrame].pipelineBarrier2(dependencyInfo);
@@ -414,11 +431,18 @@ namespace Renderer {
         depthAttachment.storeOp = vk::AttachmentStoreOp::eStore;
         depthAttachment.clearValue = vk::ClearValue().setDepthStencil({1.0f, 0});
 
+        vk::RenderingAttachmentInfo normalAttachment{};
+        normalAttachment.imageView = *m_NormalBuffer->imageView;
+        normalAttachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        normalAttachment.loadOp = vk::AttachmentLoadOp::eClear;
+        normalAttachment.storeOp = vk::AttachmentStoreOp::eStore;
+        normalAttachment.clearValue = vk::ClearValue().setColor(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f});
+
+        std::array<vk::RenderingAttachmentInfo, 2> colorAttachments{ colorAttachment, normalAttachment };
         vk::RenderingInfo renderingInfo{};
         renderingInfo.renderArea = vk::Rect2D({0,0}, m_SwapchainExtent);
         renderingInfo.layerCount = 1;
-        renderingInfo.colorAttachmentCount = 1;
-        renderingInfo.pColorAttachments = &colorAttachment;
+        renderingInfo.setColorAttachments(colorAttachments);
         renderingInfo.pDepthAttachment = &depthAttachment;
 
         m_CommandBuffers[m_CurrentFrame].beginRendering(renderingInfo);
@@ -432,6 +456,7 @@ namespace Renderer {
             0.0f, 1.0f));
 
         m_CommandBuffers[m_CurrentFrame].setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
+        m_CommandBuffers[m_CurrentFrame].bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 1, m_FrameDescriptorSets[m_CurrentFrame], nullptr);
 
         for (const auto& mesh : modelData.meshes) {
             m_CommandBuffers[m_CurrentFrame].setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
@@ -458,6 +483,7 @@ namespace Renderer {
         }
 
         m_CommandBuffers[m_CurrentFrame].endRendering();
+        RecordCompositePass(imageIndex);
     }
 
     void VulkanRenderer::EndFrame(uint32_t imageIndex, RenderMode mode)
@@ -577,6 +603,7 @@ namespace Renderer {
                 }
             }
             BeginFrame();
+            WriteFrameUniforms(viewMatrix, mode);
 
             if (mode == RenderMode::RayTraced) {
                 RecordRayTracingPass(imageIndex, viewMatrix);
@@ -801,7 +828,8 @@ namespace Renderer {
             1,
             vk::SampleCountFlagBits::e1,
             vk::ImageTiling::eOptimal,
-            vk::ImageUsageFlagBits::eDepthStencilAttachment,
+            // Sampled: the composite pass finds outlines in it
+            vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eSampled,
             vk::SharingMode::eExclusive,
             0,
             nullptr,
@@ -956,11 +984,13 @@ namespace Renderer {
         );
         LOG_DEBUG("VulkanRenderer", "Color blending state configured (no blending)");
 
+        // Color and normals: neither blends
+        std::array<vk::PipelineColorBlendAttachmentState, 2> colorBlendAttachments{ colorBlendAttachment, colorBlendAttachment };
         vk::PipelineColorBlendStateCreateInfo colorBlending(
             {},                              // flags
             VK_FALSE,                        // logicOpEnable
             vk::LogicOp::eCopy,             // logicOp
-            1, &colorBlendAttachment,       // attachmentCount, pAttachments
+            static_cast<uint32_t>(colorBlendAttachments.size()), colorBlendAttachments.data(), // attachmentCount, pAttachments
             {0.0f, 0.0f, 0.0f, 0.0f}        // blendConstants
         );
         LOG_DEBUG("VulkanRenderer", "Color blend state configured");
@@ -985,9 +1015,11 @@ namespace Renderer {
             static_cast<uint32_t>(sizeof(PushConstantData))                  // size
         );
 
+        // Set 0: the mesh's material. 1: the frame's lighting (lighting.slang)
+        std::array<vk::DescriptorSetLayout, 2> setLayouts{ **m_DescriptorSetLayout, **m_FrameSetLayout };
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo(
             {},         // flags
-            1, &**m_DescriptorSetLayout, // setLayoutCount, pSetLayouts (descriptor sets)
+            static_cast<uint32_t>(setLayouts.size()), setLayouts.data(), // setLayoutCount, pSetLayouts (descriptor sets)
             1, &pushConstantRange // pushConstantRangeCount, pPushConstantRanges
         );
         m_PipelineLayout = vk::raii::PipelineLayout(m_Device.value(), pipelineLayoutInfo);
@@ -996,10 +1028,11 @@ namespace Renderer {
         // ═══════════════════════════════════════════════════════════
         // 10. DYNAMIC RENDERING INFO (Vulkan 1.3 - replaces render passes)
         // ═══════════════════════════════════════════════════════════
-        vk::Format colorFormat = m_SwapchainImageFormat.format;
+        // Color, and world-space normals for the composite pass's outlines
+        std::array<vk::Format, 2> colorFormats{ m_SwapchainImageFormat.format, NormalBufferFormat };
         vk::PipelineRenderingCreateInfo renderingInfo(
             {},                           // flags
-            1, &colorFormat,             // viewMask, colorAttachmentCount, pColorAttachmentFormats
+            static_cast<uint32_t>(colorFormats.size()), colorFormats.data(), // viewMask, colorAttachmentCount, pColorAttachmentFormats
             m_DepthFormat,      // depthAttachmentFormat
             vk::Format::eUndefined       // stencilAttachmentFormat
         );
@@ -1127,7 +1160,9 @@ namespace Renderer {
         m_SwapchainExtent = ChooseSwapExtent(surfaceCapabilities, m_Window->GetWidth(), m_Window->GetHeight());
         LOG_DEBUG("VulkanRenderer", "\tChosen swapchain extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
         m_DepthBuffer = CreateDepthBuffer();
-        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), 0.1f, 100.0f);
+        m_NormalBuffer = CreateNormalBuffer();
+        WriteCompositeDescriptorSet();
+        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), NearPlane, FarPlane);
         m_ProjectionMatrix[1][1] *= -1; // Invert Y for Vulkan's coordinate system
 
         uint32_t minImageCount = (surfaceCapabilities.maxImageCount > 0) 
@@ -1185,7 +1220,7 @@ namespace Renderer {
         auto surfaceCapabilities = m_PhysicalDevice->getSurfaceCapabilitiesKHR(*m_Surface);
         m_SwapchainExtent = ChooseSwapExtent(surfaceCapabilities, m_Window->GetWidth(), m_Window->GetHeight());
         m_DepthBuffer = CreateDepthBuffer();
-        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), 0.1f, 100.0f);
+        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), NearPlane, FarPlane);
         m_ProjectionMatrix[1][1] *= -1; // Invert Y for Vulkan's coordinate system
         if (m_SwapchainExtent.width == 0 || m_SwapchainExtent.height == 0)
         {

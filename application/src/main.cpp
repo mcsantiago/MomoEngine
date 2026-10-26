@@ -68,12 +68,15 @@ void SetLogLevelFromEnvironment()
     }
 }
 
-// MOMO_RENDER_MODE=raytraced starts in ray traced mode (P toggles at runtime)
+// MOMO_RENDER_MODE=toon|raytraced picks the starting render mode (P cycles them at runtime)
 Momo::Renderer::RenderMode GetRenderModeFromEnvironment()
 {
     const char* modeStr = std::getenv("MOMO_RENDER_MODE");
     if (modeStr && strcmp(modeStr, "raytraced") == 0) {
         return Momo::Renderer::RenderMode::RayTraced;
+    }
+    if (modeStr && strcmp(modeStr, "toon") == 0) {
+        return Momo::Renderer::RenderMode::Toon;
     }
     return Momo::Renderer::RenderMode::Raster;
 }
