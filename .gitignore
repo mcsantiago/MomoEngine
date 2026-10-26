@@ -26,3 +26,7 @@ TODO.md
 application/Assets/Models/FlightHelmet/
 application/Assets/Models/Sponza/
 application/Assets/Models/DamagedHelmet/
+
+# Scenes built by tools/blender from local asset packs whose licenses forbid
+# redistributing the models (e.g. Low Poly Bakery Pack); regenerate them locally
+application/Assets/Scenes/PankoBakery/
