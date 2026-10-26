@@ -613,6 +613,7 @@ namespace Renderer {
                 }
             }
             BeginFrame();
+            RecordBufferUpdates();
             WriteFrameUniforms(viewMatrix, mode);
 
             if (mode == RenderMode::RayTraced) {
@@ -671,7 +672,8 @@ namespace Renderer {
 
     VulkanMaterialData VulkanRenderer::CreateVulkanMaterialData(const AllocatedImage& baseColorTexture, const MaterialParams& materialParams, bool doubleSided)
     {
-        auto ubo = CreateBuffer(&materialParams, sizeof(MaterialParams), vk::BufferUsageFlagBits::eUniformBuffer, 0);
+        // Transfer dst: UpdateMaterial rewrites it from the command buffer
+        auto ubo = CreateBuffer(&materialParams, sizeof(MaterialParams), vk::BufferUsageFlagBits::eUniformBuffer | vk::BufferUsageFlagBits::eTransferDst, 0);
         auto descriptorSet = m_DescriptorAllocator.AllocateDescriptorSet(**m_DescriptorSetLayout);
         WriteDescriptorSet(descriptorSet, ubo, baseColorTexture);
         return VulkanMaterialData{ 
@@ -679,6 +681,51 @@ namespace Renderer {
             .descriptorSet=descriptorSet, 
             .paramsBuffer=std::move(ubo)
         };
+    }
+
+    void VulkanRenderer::UpdateMaterial(Assets::MaterialHandle handle, const VulkanMaterialData& rasterMaterial, const Assets::Material& material)
+    {
+        auto bytesOf = [](const auto& value) {
+            const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+            return std::vector<uint8_t>(bytes, bytes + sizeof(value));
+        };
+        m_PendingBufferUpdates.push_back({ *rasterMaterial.paramsBuffer.buffer, 0, bytesOf(ToMaterialParams(material)) });
+
+        m_EmissiveOverrides[handle] = material.emissive;
+        auto it = std::find(m_RayTracingMaterialHandles.begin(), m_RayTracingMaterialHandles.end(), handle);
+        if (m_RayTracingScene && it != m_RayTracingMaterialHandles.end()) {
+            size_t index = static_cast<size_t>(it - m_RayTracingMaterialHandles.begin());
+            m_RayTracingMaterials[index].emissive = glm::vec4(material.emissive, 0.0f);
+            m_PendingBufferUpdates.push_back({ *m_RayTracingScene->materials.buffer, index * sizeof(RayTracing::RayTracingMaterial), bytesOf(m_RayTracingMaterials[index]) });
+            m_AccumulatedSamples = 0;
+        }
+    }
+
+    void VulkanRenderer::RecordBufferUpdates()
+    {
+        if (m_PendingBufferUpdates.empty()) {
+            return;
+        }
+        auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
+        constexpr vk::PipelineStageFlags2 readers = vk::PipelineStageFlagBits2::eVertexShader | vk::PipelineStageFlagBits2::eFragmentShader
+                                                  | vk::PipelineStageFlagBits2::eComputeShader;
+
+        // Earlier frames' shaders may still be reading the old contents
+        vk::MemoryBarrier2 beforeUpdate(readers, {}, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+        vk::DependencyInfo before{};
+        before.setMemoryBarriers(beforeUpdate);
+        commandBuffer.pipelineBarrier2(before);
+
+        for (const PendingBufferUpdate& update : m_PendingBufferUpdates) {
+            commandBuffer.updateBuffer<uint8_t>(update.buffer, update.offset, update.data);
+        }
+        m_PendingBufferUpdates.clear();
+
+        vk::MemoryBarrier2 afterUpdate(vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                                       readers, vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eShaderStorageRead);
+        vk::DependencyInfo after{};
+        after.setMemoryBarriers(afterUpdate);
+        commandBuffer.pipelineBarrier2(after);
     }
 
     void VulkanRenderer::WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedBuffer& ubo,  const AllocatedImage& textureImage)

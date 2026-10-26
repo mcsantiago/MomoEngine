@@ -74,6 +74,29 @@ namespace Momo
         Renderer::ToonSettings m_ToonSettings;
         void DrawSettingsPanel();
 
+        // Light editor: the scene's point lights and glowing (emissive)
+        // materials, as edited and as loaded. Colors and strengths are split
+        // so a slider can scale a light without changing its hue.
+        struct EditablePointLight
+        {
+            std::string name;
+            glm::vec3 position;
+            glm::vec3 color;
+            float intensity; // W/sr: a surface at distance d facing the light receives color * intensity / d^2
+        };
+        struct EditableGlow
+        {
+            Assets::MaterialHandle handle;
+            std::string name;
+            glm::vec3 color;
+            float strength;
+        };
+        std::vector<EditablePointLight> m_PointLights, m_LoadedPointLights;
+        std::vector<EditableGlow> m_Glows, m_LoadedGlows;
+        void CollectEditableLights(Assets::ModelHandle model);
+        void ApplyGlow(const EditableGlow& glow);
+        void DrawLightsSection();
+
         std::unique_ptr<IWindow> m_Window;
         Renderer::VulkanRenderer m_Renderer; // Maybe this can be abstracted later
         std::vector<std::unique_ptr<Layer>> m_Layers;

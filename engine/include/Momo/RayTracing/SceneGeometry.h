@@ -33,6 +33,7 @@ struct SceneGeometry {
     std::vector<TrianglePositions> positions;
     std::vector<TriangleShading> shading;
     std::vector<RayTracingMaterial> materials;
+    std::vector<Assets::MaterialHandle> materialHandles; // Registry material of each entry of materials
     // Registry textures the materials sample, by slot; slot 0 is the default
     // white texture. The renderer binds their GPU images as an array.
     std::vector<Assets::TextureHandle> textures;

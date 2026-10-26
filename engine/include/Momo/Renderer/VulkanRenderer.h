@@ -6,6 +6,7 @@
 #include <array>
 #include <optional>
 #include <cstdint>
+#include <unordered_map>
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE // Vulkan depth [0, 1] range
 #include <glm/glm.hpp>
 #include "Momo/Window.h"
@@ -95,6 +96,7 @@ struct GpuPointLight
 {
     glm::vec4 position;  // w unused
     glm::vec4 intensity; // rgb: radiant intensity (see Assets::PointLight); a unused
+    bool operator==(const GpuPointLight&) const = default;
 };
 static_assert(sizeof(GpuPointLight) == 32, "GpuPointLight must match lighting.slang");
 
@@ -168,11 +170,16 @@ public:
     // textureViews[i] is the GPU image of geometry.textures[i]; the caller keeps
     // the images alive while the scene is in use. Replaces any previous scene.
     void UploadRayTracingScene(RayTracing::SceneGeometry geometry, std::vector<vk::ImageView> textureViews);
-    // The scene's point lights, in world space, for every render path. Replaces any previous ones.
+    // The scene's point lights, in world space, for every render path. Replaces
+    // any previous ones from the next frame on; cheap enough to call every frame.
     void SetPointLights(const std::vector<Assets::PointLight>& lights);
     // Used from the next frame on
     void SetLighting(const SceneLighting& lighting) { m_Lighting = lighting; }
     void SetToonSettings(const ToonSettings& toon) { m_Toon = toon; }
+    // Applies an edited material to every render path from the next frame on:
+    // rasterMaterial is its raster copy (MaterialGPUCache); the ray tracing
+    // copy only takes the emissive color, the one property edited so far.
+    void UpdateMaterial(Assets::MaterialHandle handle, const VulkanMaterialData& rasterMaterial, const Assets::Material& material);
     // World-space box around the scene; the sun's shadow map covers it
     void SetShadowBounds(const glm::vec3& min, const glm::vec3& max);
     // False if the device can't present a ray traced image or no scene was uploaded
@@ -335,13 +342,32 @@ private:
     std::array<vk::DescriptorSet, MAX_FRAMES_IN_FLIGHT> m_FrameDescriptorSets{};
     std::vector<AllocatedBuffer> m_FrameUniformBuffers; // Host visible, mapped for the renderer's lifetime
     std::array<void*, MAX_FRAMES_IN_FLIGHT> m_FrameUniformsMapped{};
-    std::optional<AllocatedBuffer> m_PointLightBuffer; // A zeroed placeholder entry when the scene has none
-    uint32_t m_PointLightCount = 0;
+    // Point lights: copied into the frame's buffer each frame, so editing them never waits on the GPU
+    static constexpr uint32_t MaxPointLights = 64;
+    std::vector<GpuPointLight> m_PointLights;
+    std::vector<AllocatedBuffer> m_PointLightBuffers; // MaxPointLights entries each, host visible and mapped
+    std::array<void*, MAX_FRAMES_IN_FLIGHT> m_PointLightsMapped{};
     static constexpr float NearPlane = 0.1f;
     static constexpr float FarPlane = 100.0f;
 
     bool m_ImGuiInitialized = false;
     vk::Format m_ImGuiColorFormat; // Referenced by the backend's pipeline info
+
+    // Edits to GPU buffers that frames in flight may be reading, applied in
+    // order at the start of the next frame's command buffer (vkCmdUpdateBuffer)
+    struct PendingBufferUpdate
+    {
+        vk::Buffer buffer;
+        vk::DeviceSize offset;
+        std::vector<uint8_t> data;
+    };
+    std::vector<PendingBufferUpdate> m_PendingBufferUpdates;
+    void RecordBufferUpdates();
+    // The ray tracing scene's materials as uploaded, and their registry handles, so edits can find them
+    std::vector<RayTracing::RayTracingMaterial> m_RayTracingMaterials;
+    std::vector<Assets::MaterialHandle> m_RayTracingMaterialHandles;
+    // Emissive edits, re-applied when the ray tracing scene is (re)uploaded after them
+    std::unordered_map<Assets::MaterialHandle, glm::vec3> m_EmissiveOverrides;
 
     // Sun shadow map: shared by all frames in flight, like the depth buffer
     static constexpr uint32_t ShadowMapSize = 4096;

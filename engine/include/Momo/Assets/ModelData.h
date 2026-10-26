@@ -1,6 +1,7 @@
 #pragma once
 #include "Momo/Geometry/Vertex.h"
 #include "Handle.h"
+#include <string>
 
 namespace Momo::Assets {
 struct TextureData {
@@ -27,6 +28,7 @@ struct Material {
     AlphaMode alphaMode = AlphaMode::Opaque; // Alpha mode for the material
     TextureHandle baseColorTextureHandle; // Handle to the base color texture for the material
     glm::vec3 emissive = glm::vec3(0.0f); // Light the surface gives off: emissiveFactor * emissive strength
+    std::string name; // From the source file; may be empty
 };
 
 // A point light (KHR_lights_punctual) placed in the model
@@ -35,6 +37,7 @@ struct PointLight {
     // Radiant intensity per channel (color * intensity): a surface at distance d
     // facing the light receives intensity / d^2
     glm::vec3 intensity;
+    std::string name; // Of the node holding it in the source file; may be empty
 };
 
 struct Mesh {

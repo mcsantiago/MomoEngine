@@ -223,7 +223,20 @@ namespace Renderer {
 
         // Frames in flight may still be reading the previous scene's buffers
         m_Device->waitIdle();
+        if (m_RayTracingScene) {
+            std::erase_if(m_PendingBufferUpdates, [&](const PendingBufferUpdate& update) {
+                return update.buffer == *m_RayTracingScene->materials.buffer;
+            });
+        }
         m_RayTracingScene.reset();
+
+        // Material edits made before the scene was ready
+        for (size_t i = 0; i < geometry.materials.size(); i++) {
+            auto it = m_EmissiveOverrides.find(geometry.materialHandles[i]);
+            if (it != m_EmissiveOverrides.end()) {
+                geometry.materials[i].emissive = glm::vec4(it->second, 0.0f);
+            }
+        }
 
         auto upload = [this](const auto& items) {
             return CreateDeviceLocalBuffer(items.data(), sizeof(items[0]) * items.size(), vk::BufferUsageFlagBits::eStorageBuffer);
@@ -242,6 +255,8 @@ namespace Renderer {
             .gpuBytes = totalBytes,
         });
         m_RayTracingTextureViews = std::move(textureViews);
+        m_RayTracingMaterials = std::move(geometry.materials);
+        m_RayTracingMaterialHandles = std::move(geometry.materialHandles);
         m_AccumulatedSamples = 0;
 
         if (!m_RayTracingDescriptorSet) {
@@ -250,7 +265,7 @@ namespace Renderer {
         WriteRayTracingDescriptorSet();
 
         LOG_INFO("VulkanRenderer", "Uploaded ray tracing scene: {} triangles, {} materials, {} textures, {:.1f} MB",
-                 geometry.positions.size(), geometry.materials.size(), geometry.textures.size(),
+                 geometry.positions.size(), m_RayTracingMaterials.size(), geometry.textures.size(),
                  totalBytes / (1024.0 * 1024.0));
     }
 

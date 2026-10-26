@@ -228,6 +228,7 @@ public:
             matSources[i].baseColorTexture = FindBaseColorImageIndex(asset.get(), material);
             matSources[i].alphaMode = MapAlphaMode(material.alphaMode);
             matSources[i].alphaCutoff = material.alphaCutoff;
+            matSources[i].name = std::string(material.name);
             matSources[i].emissive = glm::vec3(
                 material.emissiveFactor[0],
                 material.emissiveFactor[1],
@@ -257,6 +258,7 @@ public:
                     pointLights.push_back(PointLight{
                         .position = glm::vec3(toModel[3]),
                         .intensity = color * static_cast<float>(light.intensity),
+                        .name = std::string(node.name),
                     });
                 } else {
                     LOG_WARN(TAG, "Skipping light '{}': only point lights are supported", light.name);

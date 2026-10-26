@@ -32,10 +32,13 @@ namespace Renderer {
             },
         });
 
-        FrameUniforms initial{};
+        FrameUniforms initialUniforms{};
+        std::array<GpuPointLight, MaxPointLights> initialLights{};
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            m_FrameUniformBuffers.push_back(CreateBuffer(&initial, sizeof(FrameUniforms), vk::BufferUsageFlagBits::eUniformBuffer, 0));
+            m_FrameUniformBuffers.push_back(CreateBuffer(&initialUniforms, sizeof(FrameUniforms), vk::BufferUsageFlagBits::eUniformBuffer, 0));
             m_FrameUniformsMapped[i] = m_FrameUniformBuffers[i].memory.mapMemory(0, sizeof(FrameUniforms));
+            m_PointLightBuffers.push_back(CreateBuffer(initialLights.data(), sizeof(initialLights), vk::BufferUsageFlagBits::eStorageBuffer, 0));
+            m_PointLightsMapped[i] = m_PointLightBuffers[i].memory.mapMemory(0, sizeof(initialLights));
             m_FrameDescriptorSets[i] = m_FrameDescriptorAllocator.AllocateDescriptorSet(**m_FrameSetLayout);
         }
         m_CompositeDescriptorSet = m_FrameDescriptorAllocator.AllocateDescriptorSet(**m_CompositeSetLayout);
@@ -49,32 +52,10 @@ namespace Renderer {
         m_NearestSampler = vk::raii::Sampler(*m_Device, samplerInfo);
 
         CreateShadowMap();
-        SetPointLights({});
-    }
-
-    void VulkanRenderer::SetPointLights(const std::vector<Assets::PointLight>& lights)
-    {
-        // A storage buffer can't be empty; the shaders read only pointLightCount entries
-        std::vector<GpuPointLight> gpuLights;
-        for (const Assets::PointLight& light : lights) {
-            gpuLights.push_back(GpuPointLight{
-                .position = glm::vec4(light.position, 1.0f),
-                .intensity = glm::vec4(light.intensity, 0.0f),
-            });
-        }
-        if (gpuLights.empty()) {
-            gpuLights.push_back(GpuPointLight{});
-        }
-
-        // Frames in flight may still be reading the old buffer
-        m_Device->waitIdle();
-        m_PointLightBuffer.emplace(CreateDeviceLocalBuffer(gpuLights.data(), sizeof(GpuPointLight) * gpuLights.size(), vk::BufferUsageFlagBits::eStorageBuffer));
-        m_PointLightCount = static_cast<uint32_t>(lights.size());
-        m_AccumulatedSamples = 0;
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vk::DescriptorBufferInfo uniformInfo(*m_FrameUniformBuffers[i].buffer, 0, sizeof(FrameUniforms));
-            vk::DescriptorBufferInfo lightInfo(*m_PointLightBuffer->buffer, 0, vk::WholeSize);
+            vk::DescriptorBufferInfo lightInfo(*m_PointLightBuffers[i].buffer, 0, vk::WholeSize);
             vk::DescriptorImageInfo shadowInfo(**m_ShadowSampler, *m_ShadowMap->imageView, vk::ImageLayout::eShaderReadOnlyOptimal);
             std::array<vk::WriteDescriptorSet, 3> writes{
                 vk::WriteDescriptorSet(m_FrameDescriptorSets[i], 0, 0, vk::DescriptorType::eUniformBuffer, nullptr, uniformInfo),
@@ -83,8 +64,24 @@ namespace Renderer {
             };
             m_Device->updateDescriptorSets(writes, nullptr);
         }
-        if (!lights.empty()) {
-            LOG_INFO("VulkanRenderer", "Using {} point lights", lights.size());
+    }
+
+    void VulkanRenderer::SetPointLights(const std::vector<Assets::PointLight>& lights)
+    {
+        if (lights.size() > MaxPointLights) {
+            LOG_WARN("VulkanRenderer", "Scene has {} point lights; using the first {}", lights.size(), MaxPointLights);
+        }
+        std::vector<GpuPointLight> gpuLights;
+        for (size_t i = 0; i < std::min<size_t>(lights.size(), MaxPointLights); i++) {
+            gpuLights.push_back(GpuPointLight{
+                .position = glm::vec4(lights[i].position, 1.0f),
+                .intensity = glm::vec4(lights[i].intensity, 0.0f),
+            });
+        }
+        // The path tracer's running average was made with the old lights
+        if (gpuLights != m_PointLights) {
+            m_PointLights = std::move(gpuLights);
+            m_AccumulatedSamples = 0;
         }
     }
 
@@ -103,7 +100,7 @@ namespace Renderer {
             .skyHorizon = glm::vec4(lighting.skyHorizon, 0.0f),
             .skyZenith = glm::vec4(lighting.skyZenith, 0.0f),
             .exposure = lighting.exposure,
-            .pointLightCount = m_PointLightCount,
+            .pointLightCount = static_cast<uint32_t>(m_PointLights.size()),
             .shadingModel = static_cast<uint32_t>(mode == RenderMode::Toon ? ShadingModel::Toon : ShadingModel::Lambert),
             .nearPlane = NearPlane,
             .farPlane = FarPlane,
@@ -128,6 +125,9 @@ namespace Renderer {
             },
         };
         std::memcpy(m_FrameUniformsMapped[m_CurrentFrame], &uniforms, sizeof(uniforms));
+        if (!m_PointLights.empty()) {
+            std::memcpy(m_PointLightsMapped[m_CurrentFrame], m_PointLights.data(), sizeof(GpuPointLight) * m_PointLights.size());
+        }
     }
 
     AllocatedImage VulkanRenderer::CreateNormalBuffer()

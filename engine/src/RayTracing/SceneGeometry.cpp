@@ -29,6 +29,7 @@ public:
         auto [it, inserted] = m_MaterialIndices.try_emplace(handle, static_cast<uint32_t>(m_Materials.size()));
         if (inserted)
         {
+            m_Handles.push_back(handle);
             // Meshes without a material get an opaque white one
             Assets::Material material{ .baseColorFactor = glm::vec4(1.0f) };
             if (handle.IsValid())
@@ -48,6 +49,7 @@ public:
     const RayTracingMaterial& Get(uint32_t index) const { return m_Materials[index]; }
 
     std::vector<RayTracingMaterial> TakeMaterials() { return std::move(m_Materials); }
+    std::vector<Assets::MaterialHandle> TakeHandles() { return std::move(m_Handles); }
     std::vector<Assets::TextureHandle> TakeTextures() { return std::move(m_Textures); }
 
 private:
@@ -71,6 +73,7 @@ private:
     const Assets::AssetRegistry& m_Registry;
     std::unordered_map<Assets::MaterialHandle, uint32_t> m_MaterialIndices;
     std::vector<RayTracingMaterial> m_Materials;
+    std::vector<Assets::MaterialHandle> m_Handles; // Parallel to m_Materials
     std::unordered_map<Assets::TextureHandle, uint32_t> m_TextureIndices;
     std::vector<Assets::TextureHandle> m_Textures;
 };
@@ -139,6 +142,7 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
     geometry.positions = Reorder<TrianglePositions>(positions, geometry.bvh.triangleOrder);
     geometry.shading = Reorder<TriangleShading>(shading, geometry.bvh.triangleOrder);
     geometry.materials = materials.TakeMaterials();
+    geometry.materialHandles = materials.TakeHandles();
     geometry.textures = materials.TakeTextures();
     return geometry;
 }

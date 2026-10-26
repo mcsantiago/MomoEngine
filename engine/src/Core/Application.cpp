@@ -4,6 +4,7 @@
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Renderer/VulkanMeshData.h"
 #include "Momo/Renderer/VulkanRenderer.h"
+#include <algorithm>
 #include <chrono>
 #include <limits>
 #include <Momo/Logging/Logger.h>
@@ -82,6 +83,7 @@ namespace Momo
         m_ActiveScene->AddModel(handle);
         // Models have no transform of their own yet, so model space is world space
         m_Renderer.SetPointLights(m_AssetRegistry.Get(handle).pointLights);
+        CollectEditableLights(handle);
         glm::vec3 boundsMin(std::numeric_limits<float>::max());
         glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
         for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(handle).meshes)
@@ -217,6 +219,10 @@ namespace Momo
                 ImGui::Render();
                 m_Renderer.SetLighting(m_Lighting);
                 m_Renderer.SetToonSettings(m_ToonSettings);
+                std::vector<Assets::PointLight> pointLights;
+                for (const EditablePointLight& light : m_PointLights)
+                    pointLights.push_back({ .position = light.position, .intensity = light.color * light.intensity, .name = light.name });
+                m_Renderer.SetPointLights(pointLights);
             }
 
             updateTimer.Start();
@@ -289,6 +295,92 @@ namespace Momo
         }
     }
 
+    namespace
+    {
+        // value = color * strength, with the strength taken from the brightest channel
+        void SplitColor(const glm::vec3& value, glm::vec3& color, float& strength)
+        {
+            strength = std::max(value.r, std::max(value.g, value.b));
+            color = strength > 0.0f ? value / strength : glm::vec3(1.0f);
+        }
+    }
+
+    void Application::CollectEditableLights(Assets::ModelHandle model)
+    {
+        m_PointLights.clear();
+        for (const Assets::PointLight& light : m_AssetRegistry.Get(model).pointLights)
+        {
+            EditablePointLight editable{ .name = light.name, .position = light.position };
+            SplitColor(light.intensity, editable.color, editable.intensity);
+            m_PointLights.push_back(editable);
+        }
+        m_LoadedPointLights = m_PointLights;
+
+        m_Glows.clear();
+        for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(model).meshes)
+        {
+            Assets::MaterialHandle materialHandle = m_AssetRegistry.Get(meshHandle).materialHandle;
+            const Assets::Material& material = m_AssetRegistry.Get(materialHandle);
+            bool known = std::any_of(m_Glows.begin(), m_Glows.end(), [&](const EditableGlow& glow) { return glow.handle == materialHandle; });
+            if (known || material.emissive == glm::vec3(0.0f))
+                continue;
+            EditableGlow glow{ .handle = materialHandle, .name = material.name };
+            SplitColor(material.emissive, glow.color, glow.strength);
+            m_Glows.push_back(glow);
+        }
+        m_LoadedGlows = m_Glows;
+    }
+
+    void Application::ApplyGlow(const EditableGlow& glow)
+    {
+        Assets::Material material = m_AssetRegistry.Get(glow.handle);
+        material.emissive = glow.color * glow.strength;
+        m_Renderer.UpdateMaterial(glow.handle, m_MaterialCache.GetOrCreate(glow.handle), material);
+    }
+
+    void Application::DrawLightsSection()
+    {
+        if (!ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
+            return;
+        ImGui::PushID("Lights");
+        if (m_PointLights.empty() && m_Glows.empty())
+            ImGui::TextDisabled("The scene has no point lights or glowing materials");
+
+        for (size_t i = 0; i < m_PointLights.size(); i++)
+        {
+            EditablePointLight& light = m_PointLights[i];
+            ImGui::PushID(static_cast<int>(i));
+            std::string label = light.name.empty() ? "Point light " + std::to_string(i) : light.name;
+            ImGui::SeparatorText(label.c_str());
+            ImGui::DragFloat3("Position", &light.position.x, 0.05f);
+            ImGui::ColorEdit3("Color", &light.color.x);
+            ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 2000.0f, "%.0f W/sr", ImGuiSliderFlags_Logarithmic);
+            ImGui::PopID();
+        }
+
+        for (size_t i = 0; i < m_Glows.size(); i++)
+        {
+            EditableGlow& glow = m_Glows[i];
+            ImGui::PushID(static_cast<int>(m_PointLights.size() + i));
+            std::string label = (glow.name.empty() ? "Material " + std::to_string(glow.handle.id) : glow.name) + " (glow)";
+            ImGui::SeparatorText(label.c_str());
+            bool changed = ImGui::ColorEdit3("Color", &glow.color.x);
+            changed |= ImGui::SliderFloat("Strength", &glow.strength, 0.0f, 50.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (changed)
+                ApplyGlow(glow);
+            ImGui::PopID();
+        }
+
+        if (ImGui::Button("Reset lights"))
+        {
+            m_PointLights = m_LoadedPointLights;
+            m_Glows = m_LoadedGlows;
+            for (const EditableGlow& glow : m_Glows)
+                ApplyGlow(glow);
+        }
+        ImGui::PopID();
+    }
+
     void Application::DrawSettingsPanel()
     {
         ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
@@ -330,6 +422,8 @@ namespace Momo
                 light = Renderer::SceneLighting{};
             ImGui::PopID();
         }
+
+        DrawLightsSection();
 
         if (ImGui::CollapsingHeader("Toon shading", ImGuiTreeNodeFlags_DefaultOpen))
         {

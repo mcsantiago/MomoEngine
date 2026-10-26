@@ -22,6 +22,7 @@ Material ToMaterial(const MaterialSource& source, const TextureHandle textureHan
     material.alphaCutoff = source.alphaCutoff;
     material.baseColorTextureHandle = textureHandle;
     material.emissive = source.emissive;
+    material.name = source.name;
     return material;
 }
 

@@ -29,6 +29,7 @@ struct MaterialSource {
     AlphaMode alphaMode = AlphaMode::Opaque;
     float alphaCutoff = 0.5f;
     glm::vec3 emissive = glm::vec3(0.0f);
+    std::string name;
 };
 
 struct MeshSource {
