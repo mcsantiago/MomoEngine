@@ -28,6 +28,7 @@ struct MaterialSource {
     std::optional<uint32_t> baseColorTexture;
     AlphaMode alphaMode = AlphaMode::Opaque;
     float alphaCutoff = 0.5f;
+    glm::vec3 emissive = glm::vec3(0.0f);
 };
 
 struct MeshSource {
@@ -37,6 +38,12 @@ struct MeshSource {
     std::optional<uint32_t> materialIndex;
 };
 
+// A camera placed in the model (the first one in the file)
+struct CameraSource {
+    glm::vec3 position;
+    glm::vec3 forward; // Unit length
+};
+
 struct ModelSource {
     // meshes is one entry per drawn primitive; materials and textures are flat
     // file-level tables whose indices match the glTF material / image lists, so
@@ -44,5 +51,8 @@ struct ModelSource {
     std::vector<MeshSource> meshes;
     std::vector<MaterialSource> materials;
     std::vector<TextureSource> textures;
+    // In model space, like MeshSource::localTransform
+    std::vector<PointLight> pointLights;
+    std::optional<CameraSource> camera;
 };
 } // namespace Momo::Assets

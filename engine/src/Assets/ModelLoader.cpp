@@ -166,7 +166,8 @@ private:
     const std::string TAG = "FastGltfModelLoader";
 
 public:
-    FastGltfModelLoader() : parser(fastgltf::Parser()) {}
+    FastGltfModelLoader()
+        : parser(fastgltf::Extensions::KHR_lights_punctual | fastgltf::Extensions::KHR_materials_emissive_strength) {}
         
     std::optional<Assets::ModelSource> LoadModel(const std::filesystem::path &path) override {
         // Implementation for loading a model using FastGltf goes here
@@ -195,6 +196,8 @@ public:
         std::vector<MeshSource> meshSources;
         std::vector<TextureSource> texSources;
         std::vector<MaterialSource> matSources;
+        std::vector<PointLight> pointLights;
+        std::optional<CameraSource> camera;
 
         // Pass 1: images. Indices line up 1:1 with the glTF image list, so a
         // failed decode leaves an empty slot instead of shifting every index
@@ -225,13 +228,40 @@ public:
             matSources[i].baseColorTexture = FindBaseColorImageIndex(asset.get(), material);
             matSources[i].alphaMode = MapAlphaMode(material.alphaMode);
             matSources[i].alphaCutoff = material.alphaCutoff;
+            matSources[i].emissive = glm::vec3(
+                material.emissiveFactor[0],
+                material.emissiveFactor[1],
+                material.emissiveFactor[2]
+            ) * static_cast<float>(material.emissiveStrength);
         }
 
         // Pass 3: geometry per primitive. Materials and images are already
         // loaded, so this only records the index and never bails out early.
         fastgltf::iterateSceneNodes(asset.get(), sceneIndex, sceneTransform, [&](fastgltf::Node &node, fastgltf::math::fmat4x4 nodeTransform) {
             auto &gltf = asset.get();
-            // Process each node here
+            if (node.cameraIndex.has_value() && !camera.has_value()) {
+                // glTF cameras look down their local -Z. Projection settings are
+                // ignored: the engine's field of view is fixed
+                glm::mat4 toModel = mapFastGltfToGLM(nodeTransform);
+                camera = CameraSource{
+                    .position = glm::vec3(toModel[3]),
+                    .forward = glm::normalize(glm::mat3(toModel) * glm::vec3(0.0f, 0.0f, -1.0f)),
+                };
+            }
+            if (node.lightIndex.has_value()) {
+                const fastgltf::Light &light = gltf.lights[*node.lightIndex];
+                if (light.type == fastgltf::LightType::Point) {
+                    glm::mat4 toModel = mapFastGltfToGLM(nodeTransform);
+                    glm::vec3 color(light.color[0], light.color[1], light.color[2]);
+                    // range is ignored: the light reaches everywhere, falling off as 1 / d^2
+                    pointLights.push_back(PointLight{
+                        .position = glm::vec3(toModel[3]),
+                        .intensity = color * static_cast<float>(light.intensity),
+                    });
+                } else {
+                    LOG_WARN(TAG, "Skipping light '{}': only point lights are supported", light.name);
+                }
+            }
             if (node.meshIndex.has_value()) {
                 LOG_INFO(TAG, "Node has a mesh index: {}", node.meshIndex.value());
                 for (const auto &primitive : gltf.meshes[node.meshIndex.value()].primitives) {
@@ -300,6 +330,8 @@ public:
         modelSource.meshes = std::move(meshSources);
         modelSource.materials = std::move(matSources);
         modelSource.textures = std::move(texSources);
+        modelSource.pointLights = std::move(pointLights);
+        modelSource.camera = camera;
 
         // Load the model using FastGltf here
         return modelSource;

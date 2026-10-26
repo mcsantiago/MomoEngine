@@ -26,6 +26,15 @@ struct Material {
     float alphaCutoff = 0.5f; // Cutoff value for alpha masking
     AlphaMode alphaMode = AlphaMode::Opaque; // Alpha mode for the material
     TextureHandle baseColorTextureHandle; // Handle to the base color texture for the material
+    glm::vec3 emissive = glm::vec3(0.0f); // Light the surface gives off: emissiveFactor * emissive strength
+};
+
+// A point light (KHR_lights_punctual) placed in the model
+struct PointLight {
+    glm::vec3 position;
+    // Radiant intensity per channel (color * intensity): a surface at distance d
+    // facing the light receives intensity / d^2
+    glm::vec3 intensity;
 };
 
 struct Mesh {
@@ -38,5 +47,6 @@ struct Mesh {
 // models can share the same mesh, material or texture.
 struct Model {
     std::vector<MeshHandle> meshes;
+    std::vector<PointLight> pointLights;
 };
 } // namespace Momo::Assets

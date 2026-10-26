@@ -1,10 +1,13 @@
 # Build the engine as a static lib
 add_library(MomoEngine STATIC
   src/Core/Application.cpp
+  src/Core/Benchmark.cpp
+  include/Momo/Core/Benchmark.h
   src/Logging/Logger.cpp
   src/Platform/GLFW/GLFWWindow.cpp
   src/Platform/GLFW/WindowVulkan.cpp
   src/Renderer/VulkanRenderer.cpp
+  src/Renderer/VulkanRayTracing.cpp
   include/Momo/Renderer/DescriptorAllocator.h
   src/Renderer/DescriptorAllocator.cpp
   include/Momo/Renderer/Camera.h
@@ -25,6 +28,12 @@ add_library(MomoEngine STATIC
   include/Momo/Cache/DataCache.h
   include/Momo/Cache/DataCache.h
   include/Momo/Core/Scene.h
+  include/Momo/RayTracing/Bvh.h
+  src/RayTracing/Bvh.cpp
+  include/Momo/RayTracing/SceneGeometry.h
+  src/RayTracing/SceneGeometry.cpp
+  include/Momo/RayTracing/WideBvh.h
+  src/RayTracing/WideBvh.cpp
 )
 
 # Public headers are under engine/include
@@ -131,6 +140,13 @@ set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 # Ensure output directory exists
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 
+if (MOMO_SHADER_DEBUG_INFO)
+  set(SHADER_DEBUG_ARGS -g)
+  message(STATUS "Compiling shaders with debug info")
+else()
+  set(SHADER_DEBUG_ARGS "")
+endif()
+
 # Define shader compilation function
 function(compile_slang_shader SHADER_SOURCE)
   get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME_WE)
@@ -147,6 +163,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -profile spirv_1_5
       -emit-spirv-directly
       -matrix-layout-column-major
+      ${SHADER_DEBUG_ARGS}
       -stage vertex
       -entry vertMain
       -fvk-use-entrypoint-name
@@ -165,6 +182,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -profile spirv_1_5
       -emit-spirv-directly
       -matrix-layout-column-major
+      ${SHADER_DEBUG_ARGS}
       -stage fragment
       -entry fragMain
       -fvk-use-entrypoint-name
@@ -179,9 +197,51 @@ function(compile_slang_shader SHADER_SOURCE)
   set(COMPILED_SHADERS ${COMPILED_SHADERS} ${VERT_OUTPUT} ${FRAG_OUTPUT} PARENT_SCOPE)
 endfunction()
 
-# Compile triangle.slang
+# Compute shaders have a single stage, entry point compMain. An optional
+# variant name compiles a second copy with -D<DEFINE>, written as
+# <name>_<variant>.comp.spv (e.g. raytrace_counters.comp.spv).
+function(compile_slang_compute_shader SHADER_SOURCE)
+  get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME_WE)
+  set(VARIANT ${ARGV1})
+  set(DEFINE ${ARGV2})
+  if(VARIANT)
+    set(COMP_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}_${VARIANT}.comp.spv)
+    set(DEFINE_ARG -D${DEFINE})
+  else()
+    set(COMP_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.comp.spv)
+    set(DEFINE_ARG "")
+  endif()
+  get_filename_component(OUTPUT_NAME ${COMP_OUTPUT} NAME)
+
+  add_custom_command(
+    OUTPUT ${COMP_OUTPUT}
+    COMMAND ${SLANGC_EXECUTABLE}
+      -target spirv
+      -profile spirv_1_5
+      -emit-spirv-directly
+      -matrix-layout-column-major
+      ${SHADER_DEBUG_ARGS}
+      -stage compute
+      -entry compMain
+      -fvk-use-entrypoint-name
+      ${DEFINE_ARG}
+      -o ${COMP_OUTPUT}
+      ${SHADER_SOURCE}
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/raytrace_traversal.slang
+    COMMENT "Compiling compute shader: ${OUTPUT_NAME}"
+    VERBATIM
+  )
+
+  set(COMPILED_SHADERS ${COMPILED_SHADERS} ${COMP_OUTPUT} PARENT_SCOPE)
+endfunction()
+
+# Compile triangle.slang and raytrace.slang
 set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang counters COUNT_TRAVERSAL)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang capture CAPTURE_RAYS)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/traceonly.slang)
 
 # Create custom target for all shaders
 add_custom_target(MomoShaders ALL
@@ -193,6 +253,10 @@ add_custom_target(MomoShaders ALL
 add_dependencies(MomoEngine MomoShaders)
 
 # Install shaders to output directory (optional, for deployment)
+if (MOMO_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
+
 install(DIRECTORY ${SHADER_OUTPUT_DIR}/
   DESTINATION shaders
   FILES_MATCHING PATTERN "*.spv"

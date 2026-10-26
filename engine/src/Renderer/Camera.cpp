@@ -1,11 +1,19 @@
 #include "Momo/Renderer/Camera.h"
 #include "Momo/Logging/Logger.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>
 
 namespace Momo {
 Camera::Camera(glm::vec3 position, glm::vec3 up, float yaw, float pitch)
     : m_Position(position), m_WorldUp(up), m_Yaw(yaw), m_Pitch(pitch), m_Front(glm::vec3(0.0f, 0.0f, -1.0f)), m_FirstMouse(true) {
     UpdateCameraVectors(0, 0);
+}
+
+Camera Camera::LookingAlong(glm::vec3 position, glm::vec3 up, glm::vec3 forward) {
+    // Inverts UpdateCameraVectors: front = (cos(yaw) cos(pitch), sin(pitch), sin(yaw) cos(pitch))
+    float pitch = glm::degrees(std::asin(glm::clamp(forward.y, -1.0f, 1.0f)));
+    float yaw = glm::degrees(std::atan2(forward.z, forward.x));
+    return Camera(position, up, yaw, pitch);
 }
 
 void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
@@ -15,8 +23,11 @@ void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
         m_FirstMouse = false;
     }
 
-    int deltaX = inputState.mouseX - m_LastMouseX;
-    int deltaY = inputState.mouseY - m_LastMouseY;
+    // The cursor position keeps changing while other windows have focus; only
+    // turn the camera for movement made while ours does. Tracking the position
+    // regardless keeps the camera from jumping when focus comes back.
+    int deltaX = inputState.windowFocused ? inputState.mouseX - m_LastMouseX : 0;
+    int deltaY = inputState.windowFocused ? inputState.mouseY - m_LastMouseY : 0;
     m_LastMouseX = inputState.mouseX;
     m_LastMouseY = inputState.mouseY;
 
@@ -28,6 +39,13 @@ void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
     // m_Position += inputState.keys.IsKeyPressed(Input::Key::E) ? m_Up * static_cast<float>(deltaTime) : glm::vec3(0.0f);
 
     UpdateCameraVectors(deltaX, deltaY);
+}
+
+void Camera::SetPose(glm::vec3 position, float yaw, float pitch) {
+    m_Position = position;
+    m_Yaw = yaw;
+    m_Pitch = pitch;
+    UpdateCameraVectors(0, 0);
 }
 
 glm::mat4 Camera::GetViewMatrix() const {

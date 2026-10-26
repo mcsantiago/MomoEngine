@@ -68,6 +68,38 @@ void SetLogLevelFromEnvironment()
     }
 }
 
+// MOMO_RENDER_MODE=raytraced starts in ray traced mode (P toggles at runtime)
+Momo::Renderer::RenderMode GetRenderModeFromEnvironment()
+{
+    const char* modeStr = std::getenv("MOMO_RENDER_MODE");
+    if (modeStr && strcmp(modeStr, "raytraced") == 0) {
+        return Momo::Renderer::RenderMode::RayTraced;
+    }
+    return Momo::Renderer::RenderMode::Raster;
+}
+
+// --scene=<path.gltf|path.glb> picks the scene to load (default: Sponza)
+std::optional<std::filesystem::path> GetScenePathFromCommandLine(int argc, char** argv)
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strncmp(argv[i], "--scene=", 8) == 0 && argv[i][8] != '\0') {
+            return std::filesystem::path(argv[i] + 8);
+        }
+    }
+    return std::nullopt;
+}
+
+// MOMO_BENCHMARK=<results.json> runs the ray tracing benchmark and exits
+std::optional<Momo::BenchmarkSpecification> GetBenchmarkFromEnvironment()
+{
+    const char* outputPath = std::getenv("MOMO_BENCHMARK");
+    if (!outputPath || outputPath[0] == '\0') {
+        return std::nullopt;
+    }
+    return Momo::BenchmarkSpecification{ .OutputPath = outputPath };
+}
+
 int main(int argc, char** argv)
 {
     // Read command-line arguments (if any)
@@ -82,6 +114,11 @@ int main(int argc, char** argv)
     appSpec.Name = "Hyperbolic Time Chamber v0.1";
     appSpec.WindowSpec.Width = 1920;
     appSpec.WindowSpec.Height = 1080;
+    appSpec.InitialRenderMode = GetRenderModeFromEnvironment();
+    appSpec.Benchmark = GetBenchmarkFromEnvironment();
+    if (auto scenePath = GetScenePathFromCommandLine(argc, argv)) {
+        appSpec.ScenePath = *scenePath;
+    }
 
     Momo::Application app(appSpec);
     app.PushLayer<AppLayer>();

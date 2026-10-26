@@ -11,6 +11,7 @@ enum Key {
     E,
     Space,
     Escape,
+    P,
     Count
 };
 

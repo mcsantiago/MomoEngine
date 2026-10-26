@@ -13,16 +13,24 @@ namespace Momo
 {
     Application::Application(const ApplicationSpecification& spec)
         : m_Spec(spec),
+          m_RenderMode(spec.InitialRenderMode),
           m_MeshCache(m_AssetRegistry, {m_Renderer, nullptr}), // Mesh cache has no further dependencies
           m_TextureCache(m_AssetRegistry, {m_Renderer, nullptr}), // Texture cache has no further dependencies
           m_MaterialCache(m_AssetRegistry,  {m_Renderer, &m_TextureCache})
     {
         LOG_INFO("Momo", "Starting '{}' ({}x{})", m_Spec.Name, m_Spec.WindowSpec.Width, m_Spec.WindowSpec.Height);
+        if (m_Spec.Benchmark)
+        {
+            m_Benchmark.emplace(*m_Spec.Benchmark);
+            if (m_Spec.ScenePath != ApplicationSpecification{}.ScenePath)
+                LOG_WARN("Momo", "Benchmark views are placed in Sponza; scene {} will be measured from them anyway", m_Spec.ScenePath.generic_string());
+            m_RenderMode = Renderer::RenderMode::RayTraced;
+        }
         m_Window = std::unique_ptr<IWindow>(IWindow::Create(m_Spec.WindowSpec));
         m_Renderer.Init(*m_Window);
         m_ModelLoader = std::unique_ptr<Assets::IModelLoader>(Assets::IModelLoader::CreateGltfModelLoader());
         m_AssetRegistry.Init();
-        LoadScene(""); // TODO: Replace with actual scene path
+        LoadScene(m_Spec.ScenePath);
     }
 
     Application::~Application()
@@ -38,10 +46,7 @@ namespace Momo
 
     void Application::LoadScene(const std::filesystem::path &path)
     {
-        // const std::filesystem::path modelPath = "Assets/Models/Duck/Duck.gltf";
-        // const std::filesystem::path modelPath = "Assets/Models/Panko/PANKO_Rigged.glb";
-        // const std::filesystem::path modelPath = "Assets/Models/FlightHelmet/FlightHelmet.gltf";
-        const std::filesystem::path modelPath = "Assets/Models/Sponza/Sponza.gltf";
+        const std::filesystem::path& modelPath = path;
 
         if (!std::filesystem::exists(modelPath)) {
             LOG_ERROR("Momo", "Model file does not exist: {}", modelPath.generic_string());
@@ -53,9 +58,57 @@ namespace Momo
             LOG_ERROR("Momo", "Failed to load model from path: {}", modelPath.generic_string());
             return;
         }
+        // Models have no transform of their own yet, so the camera's model space is world space
+        if (modelSource->camera.has_value()) {
+            m_Camera = Camera::LookingAlong(modelSource->camera->position, glm::vec3(0.0f, 1.0f, 0.0f), modelSource->camera->forward);
+        } else {
+            m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
+        }
         Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
         m_ActiveScene->AddModel(handle);
-        m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
+        StartRayTracingGeometryBuild();
+    }
+
+    // The BVH build takes seconds in debug builds. Running it on the main
+    // thread before the first frame kept the window from processing events
+    // long enough for the window manager to flag it as not responding.
+    void Application::StartRayTracingGeometryBuild()
+    {
+        // The scene is copied (it's a list of handles), so the worker never
+        // touches m_ActiveScene
+        m_PendingRayTracingGeometry = std::async(std::launch::async,
+            [&registry = m_AssetRegistry, scene = *m_ActiveScene]
+            {
+                Profiling::Timer bvhTimer;
+                bvhTimer.Start();
+                RayTracing::SceneGeometry geometry = RayTracing::BuildSceneGeometry(registry, scene);
+                bvhTimer.End();
+                const RayTracing::WideBvhStats& bvhStats = geometry.bvh.stats;
+                LOG_INFO("Momo", "Built BVH over {} triangles in {:.1f} ms: {} wide nodes, depth {} (binary tree: {} nodes, {} leaves, depth {}, SAH cost {:.1f})",
+                         geometry.positions.size(), bvhTimer.GetElapsedTimeInMs(), bvhStats.nodeCount, bvhStats.maxDepth,
+                         bvhStats.binary.nodeCount, bvhStats.binary.leafCount, bvhStats.binary.maxDepth, bvhStats.binary.sahCost);
+                return geometry;
+            });
+    }
+
+    // Called once per frame. Vulkan work stays on the main thread; only the CPU build runs on the worker.
+    void Application::UploadRayTracingGeometryIfReady()
+    {
+        if (!m_PendingRayTracingGeometry.valid() ||
+            m_PendingRayTracingGeometry.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            return;
+        }
+        // get() rethrows anything the build threw. The renderer keeps only the GPU copy
+        RayTracing::SceneGeometry geometry = m_PendingRayTracingGeometry.get();
+
+        // The textures are shared with the raster path, which has usually uploaded them already
+        std::vector<vk::ImageView> textureViews;
+        textureViews.reserve(geometry.textures.size());
+        for (Assets::TextureHandle texture : geometry.textures)
+            textureViews.push_back(*m_TextureCache.GetOrCreate(texture).imageView);
+
+        m_Renderer.UploadRayTracingScene(std::move(geometry), std::move(textureViews));
     }
 
     void Application::Run()
@@ -84,11 +137,39 @@ namespace Momo
                 break;
             }
 
+            UploadRayTracingGeometryIfReady();
+
+            bool toggleRenderMode = m_InputState.keys.IsKeyPressed(Input::Key::P);
+            if (toggleRenderMode && !m_ToggleRenderModeHeld && !m_Benchmark)
+            {
+                if (m_RenderMode == Renderer::RenderMode::Raster && !m_Renderer.IsRayTracingAvailable())
+                {
+                    if (m_PendingRayTracingGeometry.valid())
+                        LOG_INFO("Momo", "Ray tracing geometry is still building; staying in raster mode.");
+                    else
+                        LOG_WARN("Momo", "Ray tracing is unavailable; staying in raster mode.");
+                }
+                else
+                {
+                    m_RenderMode = m_RenderMode == Renderer::RenderMode::Raster ? Renderer::RenderMode::RayTraced : Renderer::RenderMode::Raster;
+                    LOG_INFO("Momo", "Render mode: {}", m_RenderMode == Renderer::RenderMode::RayTraced ? "ray traced" : "raster");
+                }
+            }
+            m_ToggleRenderModeHeld = toggleRenderMode;
+
             updateTimer.Start();
             for (auto& layer : m_Layers)
                 layer->OnUpdate(dt);
 
-            m_Camera->OnUpdate(dt, m_InputState);
+            // Benchmarks place the camera themselves and ignore input
+            if (!m_Benchmark)
+                m_Camera->OnUpdate(dt, m_InputState);
+            else if (!m_Benchmark->IsFinished())
+            {
+                m_Camera->SetPose(m_Benchmark->CurrentView().Position, m_Benchmark->CurrentView().Yaw, m_Benchmark->CurrentView().Pitch);
+                m_Renderer.SetTraversalCounting(m_Benchmark->IsCounting());
+                m_Renderer.SetRayCapture(m_Benchmark->IsCapturing());
+            }
             updateTimer.End();
 
             auto drawFrameTime = Draw(dt);
@@ -101,6 +182,38 @@ namespace Momo
             frameStats.fenceWaitMs  = drawFrameTime.has_value() ? drawFrameTime->fenceWaitMs : 0.0f;
             frameStats.gpuMs        = drawFrameTime.has_value() ? drawFrameTime->gpuFrameMs : 0.0f;
             statsAccumulator.Add(frameStats);
+
+            // Frames before the ray tracing geometry is uploaded render raster and don't count
+            if (m_Benchmark && drawFrameTime.has_value() && m_Renderer.IsRayTracingAvailable())
+            {
+                if (std::optional<size_t> finishedView = m_Benchmark->Record(*drawFrameTime, frameStats))
+                {
+                    vk::Extent2D extent = m_Renderer.GetSwapchainExtent();
+                    m_Benchmark->SetTraversalCounts(*finishedView, m_Renderer.ReadAndResetTraversalCounters(),
+                                                    uint64_t(extent.width) * extent.height);
+                    m_Renderer.SetTraversalCounting(false);
+                    m_Benchmark->SetTraceOnlyResults(*finishedView, m_Renderer.RunTraceOnlyExperiment());
+                    m_Renderer.SetRayCapture(false);
+                    if (m_Renderer.SaveRayTracingOutput(m_Benchmark->ScreenshotPath(*finishedView)))
+                        m_Benchmark->SetScreenshotSaved(*finishedView);
+                }
+                if (m_Benchmark->IsFinished())
+                {
+                    vk::Extent2D extent = m_Renderer.GetSwapchainExtent();
+                    const Renderer::RayTracingSceneBuffers& scene = *m_Renderer.GetRayTracingScene();
+                    m_Benchmark->WriteResults({
+                        .Gpu = m_Renderer.GetDeviceName(),
+                        .Width = extent.width,
+                        .Height = extent.height,
+                        .Bounces = m_Renderer.GetRayTracingMaxBounces(),
+                        .Bvh = scene.stats,
+                        .Triangles = scene.triangleCount,
+                        .GpuBytes = scene.gpuBytes,
+                        .NodeBytes = sizeof(RayTracing::CompressedWideNode),
+                    });
+                    m_Running = false;
+                }
+            }
 
             // Log a summary roughly once per second instead of every frame
             double statsWindowSeconds = std::chrono::duration<double>(clock::now() - statsWindowStart).count();
@@ -142,7 +255,7 @@ namespace Momo
         glm::mat4 modelMatrix = glm::mat4(1.0f); // Identity for now, should be replaced with actual entity transform
         LOG_TRACE("Momo", "Model matrix: {}", glm::to_string(modelMatrix));
 
-        Renderer::DrawFrameTime renderFrameTime = m_Renderer.RenderFrame(vulkanModelData, m_Camera->GetViewMatrix(), modelMatrix);
+        Renderer::DrawFrameTime renderFrameTime = m_Renderer.RenderFrame(vulkanModelData, m_Camera->GetViewMatrix(), modelMatrix, m_RenderMode);
         return renderFrameTime;
     }
 

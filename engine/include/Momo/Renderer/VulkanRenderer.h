@@ -1,6 +1,8 @@
 #pragma once
 #include <vulkan/vulkan_raii.hpp>
 #include <vector>
+#include <string>
+#include <filesystem>
 #include <array>
 #include <optional>
 #include <cstdint>
@@ -12,22 +14,117 @@
 #include "Momo/Assets/ModelData.h"
 #include "Momo/Renderer/DescriptorAllocator.h"
 #include "Momo/Profiling/Timer.h"
+#include "Momo/RayTracing/SceneGeometry.h"
 
 namespace Momo {
 namespace Renderer {
 struct DrawFrameTime
 {
     float recordMs, submitMs, fenceWaitMs, gpuFrameMs;
+    // GPU time of the ray tracing dispatch alone. GPU times arrive
+    // MAX_FRAMES_IN_FLIGHT frames late (read back when the frame slot comes
+    // round again), so this describes an earlier frame; false if that frame
+    // wasn't ray traced.
+    bool  hasRayTracingMs;
+    float rayTracingMs;
+};
+
+enum class RenderMode
+{
+    Raster,
+    RayTraced
+};
+
+// Push constants of raytrace.slang (std430-compatible; at most the guaranteed 128 bytes)
+struct RayTracingPushConstants
+{
+    glm::mat4 inverseViewProjection; // NDC -> world, to build each pixel's camera ray
+    glm::vec4 cameraPosition;        // w unused
+    uint32_t  frameIndex;            // Changes every ray traced frame; seeds the random numbers
+    uint32_t  sampleCount;           // Samples in the running average including this frame; 1 = start over
+    uint32_t  maxBounces;            // Bounces after the camera ray's first hit
+    uint32_t  pointLightCount;       // Lights in the point light buffer (it always holds at least one entry)
+};
+static_assert(sizeof(RayTracingPushConstants) == 96, "RayTracingPushConstants must match raytrace.slang");
+
+// Totals from the ray tracing shader's counting variant (raytrace.slang, COUNT_TRAVERSAL)
+enum TraversalCounter : uint32_t
+{
+    ClosestRays,   // Camera and bounce rays (closest hit)
+    ShadowRays,    // Any-hit rays toward the sun
+    Steps,         // Traversal loop iterations
+    NodeReads,     // BVH nodes read
+    BoxTests,
+    TriangleTests,
+    AlphaTests,
+    TraversalCounterCount
+};
+
+struct TraversalCounts
+{
+    uint64_t values[TraversalCounterCount];
+};
+
+// Trace-only experiment: one capture queue (rays of one kind and bounce)
+// traced again by the small trace-only kernel
+struct TraceOnlyQueueResult
+{
+    bool shadow;     // Shadow (any-hit) rays; otherwise camera/bounce (closest-hit) rays
+    uint32_t bounce;
+    uint32_t rays;
+    double medianMs; // GPU time of tracing the queue once
+};
+
+// GPU copies of RayTracing::SceneGeometry, in device-local storage buffers
+struct RayTracingSceneBuffers
+{
+    AllocatedBuffer nodes;
+    AllocatedBuffer positions;
+    AllocatedBuffer shading;
+    AllocatedBuffer materials;
+    AllocatedBuffer pointLights; // A zeroed placeholder entry when the scene has none
+    uint32_t pointLightCount;
+    RayTracing::WideBvhStats stats;
+    size_t triangleCount;
+    size_t gpuBytes; // All five buffers
 };
 
 class VulkanRenderer
 {
 public:
     static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+    // Timestamp queries per frame slot: frame start/end, ray tracing dispatch start/end
+    static constexpr uint32_t QUERIES_PER_FRAME = 4;
 
     void Init(const IWindow& window);
     void Shutdown();
-    DrawFrameTime RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix);
+    DrawFrameTime RenderFrame(Renderer::VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix, RenderMode mode);
+
+    // Uploads the scene's ray tracing geometry and keeps only the GPU copy.
+    // textureViews[i] is the GPU image of geometry.textures[i]; the caller keeps
+    // the images alive while the scene is in use. Replaces any previous scene.
+    void UploadRayTracingScene(RayTracing::SceneGeometry geometry, std::vector<vk::ImageView> textureViews);
+    // False if the device can't present a ray traced image or no scene was uploaded
+    bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
+    uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
+    const RayTracingSceneBuffers* GetRayTracingScene() const { return m_RayTracingScene ? &*m_RayTracingScene : nullptr; }
+    // While on, ray traced frames use the shader variant that counts its
+    // traversal work. Slower, so benchmarks only switch it on after timing.
+    void SetTraversalCounting(bool enabled) { m_CountTraversal = enabled; }
+    // Totals since the last call; waits for the GPU to go idle
+    TraversalCounts ReadAndResetTraversalCounters();
+    // While on, ray traced frames use the shader variant that records every ray
+    // it traces into capture queues (cleared when switched on). Uses ~0.8 GB.
+    void SetRayCapture(bool enabled);
+    // Traces the captured rays again with the trace-only kernel, each queue
+    // `repetitions` times, and returns the median times. Waits for the GPU.
+    std::vector<TraceOnlyQueueResult> RunTraceOnlyExperiment(uint32_t repetitions = 7);
+    // Saves the latest ray traced frame (tonemapped) as a JPEG. Waits for the GPU to go idle.
+    bool SaveRayTracingOutput(const std::filesystem::path& path);
+
+    // For benchmark reports
+    std::string GetDeviceName() const { return m_PhysicalDevice->getProperties().deviceName.data(); }
+    vk::Extent2D GetSwapchainExtent() const { return m_SwapchainExtent; }
 
     AllocatedBuffer     CreateVertexBuffer(const std::vector<Momo::Geometry::Vertex>& vertices);
     AllocatedBuffer     CreateIndexBuffer(const std::vector<uint32_t>& indices);
@@ -54,8 +151,20 @@ private:
     void CreateDescriptorSetLayout();
     void WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedBuffer& ubo, const AllocatedImage& textureImage);
 
-    void BeginFrame(uint32_t imageIndex);
-    void EndFrame(uint32_t imageIndex);
+    void BeginFrame();
+    void RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix);
+    void EndFrame(uint32_t imageIndex, RenderMode mode);
+
+    // Ray tracing (VulkanRayTracing.cpp)
+    void CheckRayTracingSupport();
+    void CreateRayTracingPipeline();
+    void CreateRayTracingImages();
+    AllocatedImage CreateRayTracingStorageImage(vk::Format format, vk::ImageUsageFlags usage);
+    void WriteRayTracingDescriptorSet();
+    void RecordRayTracingPass(uint32_t imageIndex, const glm::mat4& viewMatrix);
+    AllocatedBuffer CreateDeviceLocalBuffer(const void* data, vk::DeviceSize size, vk::BufferUsageFlags usage);
+
+    static std::vector<char> ReadFile(const std::string& filename);
     vk::raii::ShaderModule CreateShaderModule(const std::vector<char>& code);
     uint32_t FindGraphicsQueueFamilyIdx(vk::raii::PhysicalDevice);
     uint32_t FindMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties);
@@ -103,8 +212,10 @@ private:
     uint32_t m_CurrentFrame = 0;
 
     std::array<bool, MAX_FRAMES_IN_FLIGHT> m_HasTimestampQueryPoolResults{};
+    std::array<bool, MAX_FRAMES_IN_FLIGHT> m_HasRayTracingTimestamps{}; // The slot's last frame wrote the dispatch pair
     uint64_t m_TimestampValidBitmask = 0;
     double m_LastGpuFrameMs = 0;
+    std::optional<double> m_LastRayTracingMs;
     float m_TimestampPeriodNs = 0.0f;   // nanoseconds per timestamp tick
     bool  m_GpuTimingEnabled = false;   // false = skip every timestamp call later
     uint32_t m_GraphicsQueueFamilyIdx = 0;
@@ -121,6 +232,47 @@ private:
     std::optional<vk::raii::Sampler> m_TextureSampler;
     std::optional<vk::raii::DescriptorSetLayout> m_DescriptorSetLayout;
 
+    // Ray tracing resources
+    bool m_RayTracingSupported = false;
+    bool m_SupportsNonUniformTextureIndexing = false; // Set at device creation
+    std::optional<RayTracingSceneBuffers> m_RayTracingScene;
+    std::optional<vk::raii::DescriptorSetLayout> m_RayTracingSetLayout;
+    std::optional<vk::raii::PipelineLayout> m_RayTracingPipelineLayout;
+    std::optional<vk::raii::Pipeline> m_RayTracingPipeline;
+    std::optional<vk::raii::Pipeline> m_RayTracingCountingPipeline;
+    std::optional<AllocatedBuffer> m_TraversalCounterBuffer; // (low, high) word pairs, host visible
+    bool m_CountTraversal = false;
+
+    // Trace-only experiment (raytrace_traversal.slang, traceonly.slang)
+    static constexpr uint32_t CaptureBounceLimit = 6;
+    static constexpr uint32_t CaptureQueueCount = 2 * CaptureBounceLimit;
+    std::optional<vk::raii::Pipeline> m_RayTracingCapturePipeline;
+    std::optional<vk::raii::PipelineLayout> m_TraceOnlyPipelineLayout;
+    std::optional<vk::raii::Pipeline> m_TraceOnlyPipeline;
+    std::optional<AllocatedBuffer> m_CapturedRays;   // CaptureQueueCount queues of m_CaptureCapacity rays
+    std::optional<AllocatedBuffer> m_CaptureCounts;  // Host visible, one count per queue
+    std::optional<AllocatedBuffer> m_TraceHits;
+    uint32_t m_CaptureCapacity = 0;                  // Rays per queue: pixels per frame
+    bool m_CaptureRays = false;
+    void EnsureCaptureBuffers();
+    AllocatedBuffer CreateUninitializedBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags memoryProperties);
+    bool m_PipelineStatisticsEnabled = false; // VK_KHR_pipeline_executable_properties enabled
+    void LogPipelineStatistics(const vk::raii::Pipeline& pipeline, const std::string& name);
+    DescriptorAllocator m_RayTracingDescriptorAllocator;
+    vk::DescriptorSet m_RayTracingDescriptorSet; // Allocated on first upload
+    std::vector<vk::ImageView> m_RayTracingTextureViews; // Owned by the caller's texture cache
+    // Shared by all frames in flight, like the depth buffer; sized to the swapchain
+    std::optional<AllocatedImage> m_RayTracingOutput;
+    static constexpr vk::Format RayTracingOutputFormat = vk::Format::eR16G16B16A16Sfloat;
+    // Running average of every sample since the camera last moved. 32-bit:
+    // averaging hundreds of samples in 16-bit floats loses precision
+    std::optional<AllocatedImage> m_RayTracingAccumulation;
+    static constexpr vk::Format RayTracingAccumulationFormat = vk::Format::eR32G32B32A32Sfloat;
+    uint32_t m_AccumulatedSamples = 0; // 0 = the next frame starts a new average
+    uint32_t m_RayTracingFrameIndex = 0;
+    uint32_t m_RayTracingMaxBounces = 5;
+    glm::mat4 m_AccumulationViewProjection{ 0.0f }; // Camera the running average was made with
+
     // Intended for use when setting up Vulkan validation layers in instance creation.
     std::vector<char const*> m_ValidationLayers = {
         "VK_LAYER_KHRONOS_validation"
@@ -133,6 +285,7 @@ private:
 
     std::vector<const char*> m_OptionalDeviceExtensions = {
         "VK_KHR_portability_subset", // For MoltenVK on macOS
+        "VK_KHR_pipeline_executable_properties", // Compiled shader statistics (registers, ...), logged for ray tracing
     };
 
     std::vector<const char*> m_EnabledDeviceExtensions;

@@ -2,9 +2,9 @@
 #include "Momo/Logging/Logger.h"
 
 namespace Momo::Renderer {
-void DescriptorAllocator::Init(vk::Device device, std::optional<uint32_t> poolSize) {
+void DescriptorAllocator::Init(vk::Device device, const DescriptorPoolSizes& poolSizes) {
     m_Device = device;
-    m_PoolSize = poolSize.value_or(m_PoolSize);
+    m_PoolSizes = poolSizes;
     CreateDescriptorPool();
 }
 
@@ -43,25 +43,7 @@ void DescriptorAllocator::Destroy() {
 }
 
 void DescriptorAllocator::CreateDescriptorPool() {
-    vk::DescriptorPoolSize poolSize(
-        vk::DescriptorType::eCombinedImageSampler,
-        m_PoolSize
-    );
-
-    vk::DescriptorPoolSize poolSizeUBO(
-        vk::DescriptorType::eUniformBuffer,
-        m_PoolSize
-    );
-
-    std::array<vk::DescriptorPoolSize, 2> poolSizes = { poolSize, poolSizeUBO };
-
-    vk::DescriptorPoolCreateInfo poolInfo(
-        {},
-        m_PoolSize,
-        static_cast<uint32_t>(poolSizes.size()),
-        poolSizes.data()
-    );
-
+    vk::DescriptorPoolCreateInfo poolInfo({}, m_PoolSizes.maxSets, m_PoolSizes.sizes);
     m_DescriptorPool = m_Device.createDescriptorPool(poolInfo);
 }
 } // namespace Momo::Renderer

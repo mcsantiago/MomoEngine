@@ -71,15 +71,20 @@ namespace
 
     vk::SurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& availableFormats)
     {
+        // Shaders output linear light; an sRGB format makes the hardware apply
+        // the display encoding on write. A UNORM fallback would show every
+        // frame too dark. Drivers offer either channel order (e.g. NVIDIA on
+        // X11 lists only B8G8R8A8), so accept both.
         for (const auto& availableFormat : availableFormats) 
         {
-            if (availableFormat.format == vk::Format::eR8G8B8A8Srgb && 
+            if ((availableFormat.format == vk::Format::eR8G8B8A8Srgb || availableFormat.format == vk::Format::eB8G8R8A8Srgb) &&
                 availableFormat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) 
             {
                 return availableFormat;
             }
         }
 
+        LOG_WARN("VulkanRenderer", "No sRGB swapchain format available; output will look too dark");
         return availableFormats[0];
     }
 
@@ -113,8 +118,11 @@ namespace
             return actualExtent;
         }
     }
+}
 
-    static std::vector<char> ReadFile(const std::string& filename)
+namespace Momo {
+namespace Renderer {
+    std::vector<char> VulkanRenderer::ReadFile(const std::string& filename)
     {
         LOG_DEBUG("VulkanRenderer", "Reading shader file: {}", filename);
         std::ifstream file(filename, std::ios::ate | std::ios::binary);
@@ -133,10 +141,7 @@ namespace
         LOG_DEBUG("VulkanRenderer", "File read into buffer");
         return buffer;
     }
-}
 
-namespace Momo {
-namespace Renderer {
     static vk::VertexInputBindingDescription GetBindingDescription() {
         vk::VertexInputBindingDescription bindingDescription(
             0,                          // binding
@@ -191,6 +196,12 @@ namespace Renderer {
         CreateDescriptorSetLayout();
         LOG_DEBUG("VulkanRenderer", "Creating graphics pipeline...");
         CreateGraphicsPipeline();
+        LOG_DEBUG("VulkanRenderer", "Checking ray tracing support...");
+        CheckRayTracingSupport();
+        if (m_RayTracingSupported) {
+            CreateRayTracingPipeline();
+            CreateRayTracingImages();
+        }
         LOG_DEBUG("VulkanRenderer", "Creating command pool...");
         CreateCommandPool();
         LOG_DEBUG("VulkanRenderer", "Creating command buffers...");
@@ -199,7 +210,16 @@ namespace Renderer {
         CreateSyncObjects();
         LOG_DEBUG("VulkanRenderer", "Creating texture sampler...");
         CreateTextureSampler();
-        m_DescriptorAllocator.Init(*m_Device, std::nullopt);
+        // One set per material: a base color texture and a parameters UBO.
+        // The pool can't grow yet, so it caps the scene's material count.
+        constexpr uint32_t maxMaterials = 256;
+        m_DescriptorAllocator.Init(*m_Device, DescriptorPoolSizes{
+            .maxSets = maxMaterials,
+            .sizes = {
+                { vk::DescriptorType::eCombinedImageSampler, maxMaterials },
+                { vk::DescriptorType::eUniformBuffer, maxMaterials },
+            },
+        });
     }
 
     void VulkanRenderer::CheckTimestampSupport()
@@ -225,7 +245,7 @@ namespace Renderer {
         }
         vk::QueryPoolCreateInfo queryPoolInfo{};
         queryPoolInfo.queryType = vk::QueryType::eTimestamp;
-        queryPoolInfo.queryCount = 2 * MAX_FRAMES_IN_FLIGHT; // Start and end timestamps for each frame in flight
+        queryPoolInfo.queryCount = QUERIES_PER_FRAME * MAX_FRAMES_IN_FLIGHT;
         m_TimestampQueryPool = vk::raii::QueryPool(*m_Device, queryPoolInfo);
         LOG_DEBUG("VulkanRenderer", "Created timestamp query pool with {} queries.", queryPoolInfo.queryCount);
     }
@@ -287,6 +307,7 @@ namespace Renderer {
         // This also implicitly destroys the VkPhysicalDevice so no need to set it here
         m_Device->waitIdle();
         m_DescriptorAllocator.Destroy();
+        m_RayTracingDescriptorAllocator.Destroy();
     }
 
     vk::raii::CommandBuffer VulkanRenderer::BeginSingleUseCommandBuffer()
@@ -316,7 +337,7 @@ namespace Renderer {
         m_GraphicsQueue->waitIdle();
     }
 
-    void VulkanRenderer::BeginFrame(uint32_t imageIndex)
+    void VulkanRenderer::BeginFrame()
     {
         // Implementation for beginning a frame
         LOG_DEBUG("VulkanRenderer", "Beginning a frame...");
@@ -329,11 +350,14 @@ namespace Renderer {
         m_CommandBuffers[m_CurrentFrame].begin({});
 
         if (m_GpuTimingEnabled) {
-            uint32_t firstQuery = m_CurrentFrame * 2;
-            m_CommandBuffers[m_CurrentFrame].resetQueryPool(**m_TimestampQueryPool, firstQuery, 2);
+            uint32_t firstQuery = m_CurrentFrame * QUERIES_PER_FRAME;
+            m_CommandBuffers[m_CurrentFrame].resetQueryPool(**m_TimestampQueryPool, firstQuery, QUERIES_PER_FRAME);
             m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, **m_TimestampQueryPool, firstQuery);
         }
+    }
 
+    void VulkanRenderer::RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix)
+    {
         vk::ImageMemoryBarrier2 toColorAttachment{};
         toColorAttachment.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
         toColorAttachment.srcAccessMask = {};
@@ -398,22 +422,63 @@ namespace Renderer {
         renderingInfo.pDepthAttachment = &depthAttachment;
 
         m_CommandBuffers[m_CurrentFrame].beginRendering(renderingInfo);
+
+        // Draw
+        m_CommandBuffers[m_CurrentFrame].bindPipeline(vk::PipelineBindPoint::eGraphics, **m_GraphicsPipeline);
+        m_CommandBuffers[m_CurrentFrame].setViewport(0, vk::Viewport(
+            0.0f, 0.0f, 
+            static_cast<float>(m_SwapchainExtent.width), 
+            static_cast<float>(m_SwapchainExtent.height), 
+            0.0f, 1.0f));
+
+        m_CommandBuffers[m_CurrentFrame].setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
+
+        for (const auto& mesh : modelData.meshes) {
+            m_CommandBuffers[m_CurrentFrame].setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
+            m_CommandBuffers[m_CurrentFrame].bindDescriptorSets(
+                    vk::PipelineBindPoint::eGraphics, 
+                    **m_PipelineLayout, 
+                    0, 
+                    {mesh.materialData.descriptorSet}, 
+                    nullptr
+            );
+            m_CommandBuffers[m_CurrentFrame].bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
+            m_CommandBuffers[m_CurrentFrame].bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
+            PushConstantData pushConstantData;
+            pushConstantData.projectionMatrix = m_ProjectionMatrix;
+            pushConstantData.viewMatrix = viewMatrix;
+            pushConstantData.modelMatrix = modelMatrix * mesh.localTransform; // Move to GPU..?
+            m_CommandBuffers[m_CurrentFrame].pushConstants<PushConstantData>(
+                **m_PipelineLayout, 
+                vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 
+                0,
+                pushConstantData
+            );
+            m_CommandBuffers[m_CurrentFrame].drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0); 
+        }
+
+        m_CommandBuffers[m_CurrentFrame].endRendering();
     }
 
-    void VulkanRenderer::EndFrame(uint32_t imageIndex)
+    void VulkanRenderer::EndFrame(uint32_t imageIndex, RenderMode mode)
     {
         // Implementation for ending a frame
         LOG_DEBUG("VulkanRenderer", "Ending a frame...");
 
-        m_CommandBuffers[m_CurrentFrame].endRendering();
-
-        // Transition the swapchain image to present layout
+        // Transition the swapchain image to present layout. The raster pass
+        // leaves it as a color attachment; the ray tracing pass as a blit target.
         vk::ImageMemoryBarrier2 toPresent{};
-        toPresent.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
-        toPresent.srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+        if (mode == RenderMode::RayTraced) {
+            toPresent.srcStageMask = vk::PipelineStageFlagBits2::eBlit;
+            toPresent.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+            toPresent.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+        } else {
+            toPresent.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+            toPresent.srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+            toPresent.oldLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        }
         toPresent.dstStageMask = vk::PipelineStageFlagBits2::eBottomOfPipe;
         toPresent.dstAccessMask = {};
-        toPresent.oldLayout = vk::ImageLayout::eColorAttachmentOptimal;
         toPresent.newLayout = vk::ImageLayout::ePresentSrcKHR;
         toPresent.image = m_Swapchain->getImages()[imageIndex];
         toPresent.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
@@ -428,7 +493,7 @@ namespace Renderer {
 
         m_CommandBuffers[m_CurrentFrame].pipelineBarrier2(presentDependency);
         if (m_GpuTimingEnabled) {
-            m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, **m_TimestampQueryPool, m_CurrentFrame * 2 + 1);
+            m_CommandBuffers[m_CurrentFrame].writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, **m_TimestampQueryPool, m_CurrentFrame * QUERIES_PER_FRAME + 1);
         }
         m_CommandBuffers[m_CurrentFrame].end();
         m_RecordTimer.End();
@@ -437,12 +502,16 @@ namespace Renderer {
         // Submit and present
         vk::Semaphore waitSemaphores[]   = { *m_ImageAvailableSemaphores[m_CurrentFrame] };
         vk::Semaphore signalSemaphores[] = { *m_RenderFinishedSemaphores[imageIndex] };
-        vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
+        // The swapchain image is first written by the raster pass's color output
+        // or the ray tracing pass's blit; work before that (e.g. the ray tracing
+        // dispatch) doesn't need to wait for the image to be acquired
+        vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eTransfer };
 
         vk::SubmitInfo submitInfo(waitSemaphores, waitStages, *m_CommandBuffers[m_CurrentFrame], signalSemaphores);
         m_GraphicsQueue->submit(submitInfo, *m_InFlightFences[m_CurrentFrame]);
         if (m_GpuTimingEnabled) {
             m_HasTimestampQueryPoolResults[m_CurrentFrame] = true;
+            m_HasRayTracingTimestamps[m_CurrentFrame] = mode == RenderMode::RayTraced;
         }
 
         // The submit is done, so move to the next frame's resources even if present fails below
@@ -457,9 +526,12 @@ namespace Renderer {
         m_SubmitTimer.End();
     }
 
-    DrawFrameTime VulkanRenderer::RenderFrame(VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix)
+    DrawFrameTime VulkanRenderer::RenderFrame(VulkanModelData& modelData, glm::mat4 viewMatrix, glm::mat4 modelMatrix, RenderMode mode)
     {
         DrawFrameTime frameTime{};
+        if (mode == RenderMode::RayTraced && !IsRayTracingAvailable()) {
+            mode = RenderMode::Raster;
+        }
 
         // Implementation for rendering a single frame using Vulkan
         LOG_DEBUG("VulkanRenderer", "Rendering a frame...");
@@ -485,57 +557,37 @@ namespace Renderer {
             }
             // Get the timestamps written the last time this frame slot was used, if GPU timing is enabled
             if (m_GpuTimingEnabled && m_HasTimestampQueryPoolResults[m_CurrentFrame]) {
+                // Only read the dispatch pair if that frame wrote it: waiting on
+                // queries that were reset but never written would never return
+                uint32_t queryCount = m_HasRayTracingTimestamps[m_CurrentFrame] ? 4 : 2;
                 auto [result, ticks] = m_TimestampQueryPool->getResults<uint64_t>(
-                m_CurrentFrame * 2,         // firstQuery: this frame slot's start timestamp
-                2,                          // queryCount: read the start and end timestamps
-                2 * sizeof(uint64_t),       // dataSize: total bytes for the whole output (16)
-                sizeof(uint64_t),           // stride: bytes from one result to the next (8)
+                m_CurrentFrame * QUERIES_PER_FRAME, // firstQuery: this frame slot's first timestamp
+                queryCount,                         // queryCount
+                queryCount * sizeof(uint64_t),      // dataSize: total bytes for the whole output
+                sizeof(uint64_t),                   // stride: bytes from one result to the next (8)
                 vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
 
                 if (result == vk::Result::eSuccess) {
-                    uint64_t elapsedTicks = (ticks[1] - ticks[0]) & m_TimestampValidBitmask;
-                    m_LastGpuFrameMs = elapsedTicks * m_TimestampPeriodNs / 1'000'000.0f;
+                    auto ticksToMs = [this](uint64_t start, uint64_t end) {
+                        return ((end - start) & m_TimestampValidBitmask) * m_TimestampPeriodNs / 1'000'000.0;
+                    };
+                    m_LastGpuFrameMs = ticksToMs(ticks[0], ticks[1]);
+                    m_LastRayTracingMs = queryCount == 4 ? std::optional(ticksToMs(ticks[2], ticks[3])) : std::nullopt;
                     LOG_TRACE("VulkanRenderer", "GPU frame time: {} ms", m_LastGpuFrameMs);
                 }
             }
-            BeginFrame(imageIndex);
+            BeginFrame();
 
-            // Draw
-            m_CommandBuffers[m_CurrentFrame].bindPipeline(vk::PipelineBindPoint::eGraphics, **m_GraphicsPipeline);
-            m_CommandBuffers[m_CurrentFrame].setViewport(0, vk::Viewport(
-                0.0f, 0.0f, 
-                static_cast<float>(m_SwapchainExtent.width), 
-                static_cast<float>(m_SwapchainExtent.height), 
-                0.0f, 1.0f));
-
-            m_CommandBuffers[m_CurrentFrame].setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
-
-            for (const auto& mesh : modelData.meshes) {
-                m_CommandBuffers[m_CurrentFrame].setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
-                m_CommandBuffers[m_CurrentFrame].bindDescriptorSets(
-                        vk::PipelineBindPoint::eGraphics, 
-                        **m_PipelineLayout, 
-                        0, 
-                        {mesh.materialData.descriptorSet}, 
-                        nullptr
-                );
-                m_CommandBuffers[m_CurrentFrame].bindVertexBuffers(0, *mesh.gpuMesh.vertexBuffer.buffer, {0});
-                m_CommandBuffers[m_CurrentFrame].bindIndexBuffer(*mesh.gpuMesh.indexBuffer.buffer, 0, vk::IndexType::eUint32);
-                PushConstantData pushConstantData;
-                pushConstantData.projectionMatrix = m_ProjectionMatrix;
-                pushConstantData.viewMatrix = viewMatrix;
-                pushConstantData.modelMatrix = modelMatrix * mesh.localTransform; // Move to GPU..?
-                m_CommandBuffers[m_CurrentFrame].pushConstants<PushConstantData>(
-                    **m_PipelineLayout, 
-                    vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 
-                    0,
-                    pushConstantData
-                );
-                m_CommandBuffers[m_CurrentFrame].drawIndexed(mesh.gpuMesh.indexBuffer.indexCount, 1, 0, 0, 0); 
+            if (mode == RenderMode::RayTraced) {
+                RecordRayTracingPass(imageIndex, viewMatrix);
+            } else {
+                RecordRasterPass(imageIndex, modelData, viewMatrix, modelMatrix);
             }
 
-            EndFrame(imageIndex);
+            EndFrame(imageIndex, mode);
             frameTime.gpuFrameMs = m_LastGpuFrameMs;
+            frameTime.hasRayTracingMs = m_LastRayTracingMs.has_value();
+            frameTime.rayTracingMs = m_LastRayTracingMs.value_or(0.0);
             frameTime.fenceWaitMs = m_FenceWaitTimer.GetElapsedTimeInMs();
             frameTime.recordMs = m_RecordTimer.GetElapsedTimeInMs();
             frameTime.submitMs = m_SubmitTimer.GetElapsedTimeInMs();
@@ -1090,7 +1142,8 @@ namespace Renderer {
             m_SwapchainImageFormat.colorSpace,    // imageColorSpace
             m_SwapchainExtent,                    // imageExtent
             1,                                    // imageArrayLayers -- always 1 unless you're developing stereoscopic 3D app
-            vk::ImageUsageFlagBits::eColorAttachment, // imageUsage
+            // Transfer dst lets the ray tracing pass blit into the image, where supported
+            vk::ImageUsageFlagBits::eColorAttachment | (surfaceCapabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eTransferDst), // imageUsage
             vk::SharingMode::eExclusive,          // imageSharingMode
             0, nullptr,                           // queueFamilyIndexCount, pQueueFamilyIndices
             surfaceCapabilities.currentTransform, // preTransform
@@ -1150,6 +1203,12 @@ namespace Renderer {
         LOG_DEBUG("VulkanRenderer", "\tCreated new image views for extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
         CreateRenderFinishedSemaphores();
         LOG_DEBUG("VulkanRenderer", "\tCreated new render finished semaphores for extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
+        if (m_RayTracingSupported) {
+            CreateRayTracingImages();
+            if (m_RayTracingDescriptorSet) {
+                WriteRayTracingDescriptorSet();
+            }
+        }
         m_SubOptimal = false;
     }
 
@@ -1175,6 +1234,7 @@ namespace Renderer {
         // Query supported Vulkan 1.3 features from the physical device
         auto supportedFeatures = m_PhysicalDevice->getFeatures2<
             vk::PhysicalDeviceFeatures2,
+            vk::PhysicalDeviceVulkan12Features,
             vk::PhysicalDeviceVulkan13Features,
             vk::PhysicalDeviceDynamicRenderingFeatures
         >();
@@ -1190,13 +1250,27 @@ namespace Renderer {
         vk::PhysicalDeviceVulkan11Features vulkan11Features{};
         vulkan11Features.shaderDrawParameters = VK_TRUE;
 
+        // Optional: lets the ray tracing shader index its texture array with a
+        // different index per pixel. Without it, ray tracing is disabled.
+        vk::PhysicalDeviceVulkan12Features vulkan12Features{};
+        m_SupportsNonUniformTextureIndexing = supportedFeatures.get<vk::PhysicalDeviceVulkan12Features>().shaderSampledImageArrayNonUniformIndexing;
+        vulkan12Features.shaderSampledImageArrayNonUniformIndexing = m_SupportsNonUniformTextureIndexing;
+        vulkan12Features.pNext = &vulkan11Features;
+
         vk::PhysicalDeviceVulkan13Features vulkan13Features{};
         vulkan13Features.dynamicRendering = VK_TRUE;
         vulkan13Features.synchronization2 = VK_TRUE;
-        vulkan13Features.pNext = &vulkan11Features;
+        vulkan13Features.pNext = &vulkan12Features;
+
+        // Optional: lets the renderer read back compiled shader statistics
+        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR executablePropertiesFeatures{};
+        m_PipelineStatisticsEnabled = std::any_of(m_EnabledDeviceExtensions.begin(), m_EnabledDeviceExtensions.end(),
+            [](const char* name) { return std::strcmp(name, vk::KHRPipelineExecutablePropertiesExtensionName) == 0; });
+        executablePropertiesFeatures.pipelineExecutableInfo = m_PipelineStatisticsEnabled;
+        executablePropertiesFeatures.pNext = &vulkan13Features;
 
         vk::PhysicalDeviceFeatures2 features2{};
-        features2.pNext = &vulkan13Features;
+        features2.pNext = &executablePropertiesFeatures;
 
         // create a Device
         float queuePriority = 1.0f;
