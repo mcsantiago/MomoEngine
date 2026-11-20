@@ -79,6 +79,7 @@ namespace Momo
         } else {
             m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
         }
+        ApplySceneLighting(*modelSource);
         Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
         m_ActiveScene->AddModel(handle);
         // Models have no transform of their own yet, so model space is world space
@@ -99,6 +100,26 @@ namespace Momo
         if (boundsMin.x <= boundsMax.x)
             m_Renderer.SetShadowBounds(boundsMin, boundsMax);
         StartRayTracingGeometryBuild();
+    }
+
+    // A scene without its own sun or sky keeps the defaults (a sunset)
+    void Application::ApplySceneLighting(const Assets::ModelSource& model)
+    {
+        Renderer::SceneLighting lighting{};
+        if (model.sun)
+        {
+            // Inverse of SceneLighting::SunDirection()
+            glm::vec3 toward = model.sun->towardSun;
+            lighting.sunElevation = glm::degrees(std::asin(std::clamp(toward.y, -1.0f, 1.0f)));
+            lighting.sunAzimuth = glm::degrees(std::atan2(toward.z, toward.x));
+            lighting.sunColor = model.sun->color;
+            lighting.sunIntensity = model.sun->intensity;
+        }
+        lighting.skyZenith = model.sky.zenith.value_or(lighting.skyZenith);
+        lighting.skyHorizon = model.sky.horizon.value_or(lighting.skyHorizon);
+        lighting.skyGround = model.sky.ground.value_or(lighting.skyGround);
+        lighting.exposure = model.sky.exposure.value_or(lighting.exposure);
+        m_Lighting = m_LoadedLighting = lighting;
     }
 
     // The BVH build takes seconds in debug builds. Running it on the main
@@ -425,7 +446,7 @@ namespace Momo
             ImGui::SliderFloat("Occlusion strength", &light.occlusionStrength, 0.25f, 4.0f, "%.2f");
             ImGui::Checkbox("Show occlusion only", &light.showOcclusion);
             if (ImGui::Button("Reset lighting"))
-                light = Renderer::SceneLighting{};
+                light = m_LoadedLighting;
             ImGui::PopID();
         }
 

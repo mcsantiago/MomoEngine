@@ -71,6 +71,7 @@ namespace Momo
         bool m_ShowSettings = false;
         bool m_ToggleSettingsHeld = false;
         Renderer::SceneLighting m_Lighting;
+        Renderer::SceneLighting m_LoadedLighting; // Defaults plus the scene's own sun and sky; "Reset lighting" returns here
         Renderer::ToonSettings m_ToonSettings;
         void DrawSettingsPanel();
 
@@ -122,6 +123,7 @@ namespace Momo
         Renderer::VulkanModelData LoadMesh(const std::filesystem::path &path);
         std::optional<Renderer::DrawFrameTime> Draw(float dt);
         void LoadScene(const std::filesystem::path &path);
+        void ApplySceneLighting(const Assets::ModelSource& model);
         void StartRayTracingGeometryBuild();
         void UploadRayTracingGeometryIfReady();
         void LoadDefaultAssets();

@@ -45,6 +45,23 @@ struct CameraSource {
     glm::vec3 forward; // Unit length
 };
 
+// The scene's sun: its first directional light
+struct SunSource {
+    glm::vec3 towardSun; // Unit length, in model space
+    glm::vec3 color;
+    float intensity; // Irradiance on a surface facing the sun is color * intensity
+};
+
+// Sky colors and exposure, from the glTF scene's extras (momo_sky_zenith,
+// momo_sky_horizon, momo_sky_ground as RGB arrays, momo_exposure as a number).
+// Each is optional; unset ones keep the renderer's defaults.
+struct SkySource {
+    std::optional<glm::vec3> zenith;
+    std::optional<glm::vec3> horizon;
+    std::optional<glm::vec3> ground;
+    std::optional<float> exposure;
+};
+
 struct ModelSource {
     // meshes is one entry per drawn primitive; materials and textures are flat
     // file-level tables whose indices match the glTF material / image lists, so
@@ -55,5 +72,7 @@ struct ModelSource {
     // In model space, like MeshSource::localTransform
     std::vector<PointLight> pointLights;
     std::optional<CameraSource> camera;
+    std::optional<SunSource> sun;
+    SkySource sky;
 };
 } // namespace Momo::Assets

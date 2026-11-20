@@ -3,6 +3,7 @@
 #include <fastgltf/core.hpp>
 #include <stb_image.h>
 #include <fastgltf/tools.hpp>
+#include <simdjson.h>
 #include <string>
 #include <variant>
 
@@ -165,9 +166,49 @@ private:
     fastgltf::Parser parser;
     const std::string TAG = "FastGltfModelLoader";
 
+    // Sky settings read from each glTF scene's extras while parsing, by scene index
+    std::vector<SkySource> sceneSkies;
+
+    static std::optional<glm::vec3> ReadColor(simdjson::dom::object& extras, std::string_view key) {
+        simdjson::dom::array array;
+        if (extras[key].get_array().get(array) != simdjson::SUCCESS || array.size() < 3) {
+            return std::nullopt;
+        }
+        glm::vec3 color;
+        for (size_t i = 0; i < 3; ++i) {
+            double value;
+            if (array.at(i).get_double().get(value) != simdjson::SUCCESS) {
+                return std::nullopt;
+            }
+            color[int(i)] = float(value);
+        }
+        return color;
+    }
+
+    static void ParseExtras(simdjson::dom::object* extras, std::size_t objectIndex, fastgltf::Category objectType, void* userPointer) {
+        if (objectType != fastgltf::Category::Scenes) {
+            return;
+        }
+        auto& skies = static_cast<FastGltfModelLoader*>(userPointer)->sceneSkies;
+        if (skies.size() <= objectIndex) {
+            skies.resize(objectIndex + 1);
+        }
+        SkySource& sky = skies[objectIndex];
+        sky.zenith = ReadColor(*extras, "momo_sky_zenith");
+        sky.horizon = ReadColor(*extras, "momo_sky_horizon");
+        sky.ground = ReadColor(*extras, "momo_sky_ground");
+        double exposure;
+        if ((*extras)["momo_exposure"].get_double().get(exposure) == simdjson::SUCCESS) {
+            sky.exposure = float(exposure);
+        }
+    }
+
 public:
     FastGltfModelLoader()
-        : parser(fastgltf::Extensions::KHR_lights_punctual | fastgltf::Extensions::KHR_materials_emissive_strength) {}
+        : parser(fastgltf::Extensions::KHR_lights_punctual | fastgltf::Extensions::KHR_materials_emissive_strength) {
+        parser.setExtrasParseCallback(&ParseExtras);
+        parser.setUserPointer(this);
+    }
         
     std::optional<Assets::ModelSource> LoadModel(const std::filesystem::path &path) override {
         // Implementation for loading a model using FastGltf goes here
@@ -183,6 +224,7 @@ public:
         }
 
         auto options = fastgltf::Options::LoadExternalBuffers | fastgltf::Options::LoadExternalImages;
+        sceneSkies.clear();
         auto asset = parser.loadGltf(model.get(), path.parent_path(), options);
         if (!asset) {
             LOG_ERROR(TAG, "Failed to load GLTF asset from path: {}", path.string());
@@ -198,6 +240,7 @@ public:
         std::vector<MaterialSource> matSources;
         std::vector<PointLight> pointLights;
         std::optional<CameraSource> camera;
+        std::optional<SunSource> sun;
 
         // Pass 1: images. Indices line up 1:1 with the glTF image list, so a
         // failed decode leaves an empty slot instead of shifting every index
@@ -260,8 +303,16 @@ public:
                         .intensity = color * static_cast<float>(light.intensity),
                         .name = std::string(node.name),
                     });
+                } else if (light.type == fastgltf::LightType::Directional && !sun.has_value()) {
+                    // Directional lights shine down their local -Z, so +Z points toward the sun
+                    glm::mat4 toModel = mapFastGltfToGLM(nodeTransform);
+                    sun = SunSource{
+                        .towardSun = glm::normalize(glm::mat3(toModel) * glm::vec3(0.0f, 0.0f, 1.0f)),
+                        .color = glm::vec3(light.color[0], light.color[1], light.color[2]),
+                        .intensity = static_cast<float>(light.intensity),
+                    };
                 } else {
-                    LOG_WARN(TAG, "Skipping light '{}': only point lights are supported", light.name);
+                    LOG_WARN(TAG, "Skipping light '{}': only point lights and one directional light are supported", light.name);
                 }
             }
             if (node.meshIndex.has_value()) {
@@ -334,6 +385,10 @@ public:
         modelSource.textures = std::move(texSources);
         modelSource.pointLights = std::move(pointLights);
         modelSource.camera = camera;
+        modelSource.sun = sun;
+        if (sceneIndex < sceneSkies.size()) {
+            modelSource.sky = sceneSkies[sceneIndex];
+        }
 
         // Load the model using FastGltf here
         return modelSource;
