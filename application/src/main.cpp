@@ -103,6 +103,21 @@ std::optional<Momo::BenchmarkSpecification> GetBenchmarkFromEnvironment()
     return Momo::BenchmarkSpecification{ .OutputPath = outputPath };
 }
 
+// MOMO_SCREENSHOT=<image.jpg> saves a path traced frame from the scene's camera and
+// exits; MOMO_SCREENSHOT_SAMPLES=<n> sets how many samples it averages (default 256)
+std::optional<Momo::ScreenshotSpecification> GetScreenshotFromEnvironment()
+{
+    const char* outputPath = std::getenv("MOMO_SCREENSHOT");
+    if (!outputPath || outputPath[0] == '\0') {
+        return std::nullopt;
+    }
+    Momo::ScreenshotSpecification screenshot{ .OutputPath = outputPath };
+    if (const char* samples = std::getenv("MOMO_SCREENSHOT_SAMPLES")) {
+        screenshot.Samples = static_cast<uint32_t>(std::max(1, std::atoi(samples)));
+    }
+    return screenshot;
+}
+
 int main(int argc, char** argv)
 {
     // Read command-line arguments (if any)
@@ -119,6 +134,7 @@ int main(int argc, char** argv)
     appSpec.WindowSpec.Height = 1080;
     appSpec.InitialRenderMode = GetRenderModeFromEnvironment();
     appSpec.Benchmark = GetBenchmarkFromEnvironment();
+    appSpec.Screenshot = GetScreenshotFromEnvironment();
     if (auto scenePath = GetScenePathFromCommandLine(argc, argv)) {
         appSpec.ScenePath = *scenePath;
     }

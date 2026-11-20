@@ -32,6 +32,8 @@ namespace Momo
                 LOG_WARN("Momo", "Benchmark views are placed in Sponza; scene {} will be measured from them anyway", m_Spec.ScenePath.generic_string());
             m_RenderMode = Renderer::RenderMode::RayTraced;
         }
+        if (m_Spec.Screenshot)
+            m_RenderMode = Renderer::RenderMode::RayTraced;
         m_Window = std::unique_ptr<IWindow>(IWindow::Create(m_Spec.WindowSpec));
         m_Renderer.Init(*m_Window);
         // Benchmarks have no UI
@@ -193,7 +195,7 @@ namespace Momo
             UploadRayTracingGeometryIfReady();
 
             bool toggleRenderMode = m_InputState.keys.IsKeyPressed(Input::Key::P);
-            if (toggleRenderMode && !m_ToggleRenderModeHeld && !m_Benchmark)
+            if (toggleRenderMode && !m_ToggleRenderModeHeld && !m_Benchmark && !m_Spec.Screenshot)
             {
                 // Raster -> toon -> ray traced -> raster
                 switch (m_RenderMode)
@@ -250,8 +252,8 @@ namespace Momo
             for (auto& layer : m_Layers)
                 layer->OnUpdate(dt);
 
-            // Benchmarks place the camera themselves and ignore input
-            if (!m_Benchmark)
+            // Benchmarks place the camera themselves and ignore input; screenshots keep the scene's camera
+            if (!m_Benchmark && !m_Spec.Screenshot)
                 m_Camera->OnUpdate(dt, m_InputState);
             else if (!m_Benchmark->IsFinished())
             {
@@ -302,6 +304,14 @@ namespace Momo
                     });
                     m_Running = false;
                 }
+            }
+
+            if (m_Spec.Screenshot && m_Renderer.IsRayTracingAvailable() &&
+                m_Renderer.GetAccumulatedSamples() >= m_Spec.Screenshot->Samples)
+            {
+                if (!m_Renderer.SaveRayTracingOutput(m_Spec.Screenshot->OutputPath))
+                    LOG_ERROR("Momo", "Couldn't save the screenshot");
+                m_Running = false;
             }
 
             // Log a summary roughly once per second instead of every frame

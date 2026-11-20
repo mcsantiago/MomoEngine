@@ -17,6 +17,13 @@
 
 namespace Momo
 {
+    // Renders one path traced frame of the scene to a file, then exits
+    struct ScreenshotSpecification
+    {
+        std::filesystem::path OutputPath; // Written as JPEG
+        uint32_t Samples = 256;           // Path traced samples averaged before saving
+    };
+
     struct ApplicationSpecification
     {
         std::string Name = "Untitled";
@@ -27,6 +34,8 @@ namespace Momo
         std::filesystem::path ScenePath = "Assets/Models/Sponza/Sponza.gltf";
         // Set to run the ray tracing benchmark instead of interactive mode; the app exits when done
         std::optional<BenchmarkSpecification> Benchmark;
+        // Set to save a screenshot from the scene's camera instead of running interactively
+        std::optional<ScreenshotSpecification> Screenshot;
     };
 
     class Layer

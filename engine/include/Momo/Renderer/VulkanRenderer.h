@@ -194,6 +194,8 @@ public:
     // False if the device can't present a ray traced image or no scene was uploaded
     bool IsRayTracingAvailable() const { return m_RayTracingSupported && m_RayTracingScene.has_value(); }
     uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
+    // Path traced frames averaged into the current image (0 after the view or lighting changed)
+    uint32_t GetAccumulatedSamples() const { return m_AccumulatedSamples; }
     const RayTracingSceneBuffers* GetRayTracingScene() const { return m_RayTracingScene ? &*m_RayTracingScene : nullptr; }
     // While on, ray traced frames use the shader variant that counts its
     // traversal work. Slower, so benchmarks only switch it on after timing.
