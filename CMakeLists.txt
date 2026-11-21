@@ -10,6 +10,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(MOMO_BUILD_TESTS "Build the engine unit tests" ON)
+option(MOMO_BUILD_EDITOR "Build the scene editor, and edit mode into the application" ON)
 # Embeds shader source line info (slangc -g) so GPU profilers such as Nsight
 # Graphics can attribute samples to source lines. Off for normal builds.
 option(MOMO_SHADER_DEBUG_INFO "Compile shaders with debug info for GPU profiling" OFF)
@@ -18,4 +19,7 @@ if (MOMO_BUILD_TESTS)
 endif()
 
 add_subdirectory(engine)
+if (MOMO_BUILD_EDITOR)
+  add_subdirectory(editor)
+endif()
 add_subdirectory(application)

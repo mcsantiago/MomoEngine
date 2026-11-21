@@ -1,5 +1,8 @@
 #include <Momo/Core/Application.h>
 #include <Momo/Logging/Logger.h>
+#ifdef MOMO_EDITOR
+#include <MomoEditor/EditorLayer.h>
+#endif
 
 class AppLayer : public Momo::Layer
 {
@@ -118,6 +121,16 @@ std::optional<Momo::ScreenshotSpecification> GetScreenshotFromEnvironment()
     return screenshot;
 }
 
+#ifdef MOMO_EDITOR
+bool HasFlag(int argc, char** argv, const char* flag)
+{
+    for (int i = 1; i < argc; ++i)
+        if (strcmp(argv[i], flag) == 0)
+            return true;
+    return false;
+}
+#endif
+
 int main(int argc, char** argv)
 {
     // Read command-line arguments (if any)
@@ -141,6 +154,11 @@ int main(int argc, char** argv)
 
     Momo::Application app(appSpec);
     app.PushLayer<AppLayer>();
+#ifdef MOMO_EDITOR
+    // F1 switches between the scene running and editing it; --editor starts in the editor
+    if (!appSpec.Benchmark && !appSpec.Screenshot)
+        app.PushLayer<Momo::Editor::EditorLayer>(Momo::Editor::EditorSpecification{ .StartEditing = HasFlag(argc, argv, "--editor") });
+#endif
     app.Run();
 
     // Explicitly shutdown before destruction

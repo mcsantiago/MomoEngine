@@ -29,6 +29,14 @@ add_custom_target(MomoAssets ALL
   COMMENT "Copying game assets"
 )
 add_dependencies(MomoApp MomoAssets)
+
+# With the editor built, the application gets edit mode (F1, or --editor to
+# start in it), and the standalone editor finds the same assets
+if (TARGET MomoEditor)
+  target_link_libraries(MomoApp PRIVATE MomoEditor)
+  target_compile_definitions(MomoApp PRIVATE MOMO_EDITOR)
+  add_dependencies(MomoEditorApp MomoAssets)
+endif()
 # Convenience target: build, then run from the binary dir so the relative
 # "shaders/*.spv" paths in VulkanRenderer resolve.
 #   cmake --build build/clang-debug --target run
