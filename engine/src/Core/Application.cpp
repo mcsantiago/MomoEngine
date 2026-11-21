@@ -255,7 +255,7 @@ namespace Momo
             // Benchmarks place the camera themselves and ignore input; screenshots keep the scene's camera
             if (!m_Benchmark && !m_Spec.Screenshot)
                 m_Camera->OnUpdate(dt, m_InputState);
-            else if (!m_Benchmark->IsFinished())
+            else if (m_Benchmark && !m_Benchmark->IsFinished())
             {
                 m_Camera->SetPose(m_Benchmark->CurrentView().Position, m_Benchmark->CurrentView().Yaw, m_Benchmark->CurrentView().Pitch);
                 m_Renderer.SetTraversalCounting(m_Benchmark->IsCounting());
