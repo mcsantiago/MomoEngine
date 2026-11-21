@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include "Momo/Assets/Handle.h"
+#include "Momo/Assets/ModelData.h"
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE // Vulkan depth [0, 1] range
 #include <glm/glm.hpp>
 
@@ -12,10 +13,22 @@ namespace Renderer {
 struct alignas(16) MaterialParams
 {
     glm::vec4 baseColorFactor;
+    glm::vec4 emissive; // rgb: light the surface gives off; a unused
     float alphaCutoff;
     float _pad[3]; // Padding to make the struct size a multiple of 16 bytes
 };
-static_assert(sizeof(MaterialParams) == 32, "MaterialParams size must be 32 bytes");
+static_assert(sizeof(MaterialParams) == 48, "MaterialParams must match triangle.slang");
+
+inline MaterialParams ToMaterialParams(const Assets::Material& material)
+{
+    // Blend can stay "never discard" until it gets its own pipeline.
+    return MaterialParams{
+        .baseColorFactor = material.baseColorFactor,
+        .emissive = glm::vec4(material.emissive, 0.0f),
+        .alphaCutoff = (material.alphaMode == Assets::AlphaMode::Mask) ? material.alphaCutoff : -1.0f,
+        ._pad = {0, 0, 0},
+    };
+}
 
 struct PushConstantData
 {

@@ -12,6 +12,8 @@ enum Key {
     Space,
     Escape,
     P,
+    Tab,
+    Shift, // Either one
     Count
 };
 

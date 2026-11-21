@@ -1,5 +1,8 @@
 #include <Momo/Core/Application.h>
 #include <Momo/Logging/Logger.h>
+#ifdef MOMO_EDITOR
+#include <MomoEditor/EditorLayer.h>
+#endif
 
 class AppLayer : public Momo::Layer
 {
@@ -68,12 +71,15 @@ void SetLogLevelFromEnvironment()
     }
 }
 
-// MOMO_RENDER_MODE=raytraced starts in ray traced mode (P toggles at runtime)
+// MOMO_RENDER_MODE=toon|raytraced picks the starting render mode (P cycles them at runtime)
 Momo::Renderer::RenderMode GetRenderModeFromEnvironment()
 {
     const char* modeStr = std::getenv("MOMO_RENDER_MODE");
     if (modeStr && strcmp(modeStr, "raytraced") == 0) {
         return Momo::Renderer::RenderMode::RayTraced;
+    }
+    if (modeStr && strcmp(modeStr, "toon") == 0) {
+        return Momo::Renderer::RenderMode::Toon;
     }
     return Momo::Renderer::RenderMode::Raster;
 }
@@ -100,6 +106,31 @@ std::optional<Momo::BenchmarkSpecification> GetBenchmarkFromEnvironment()
     return Momo::BenchmarkSpecification{ .OutputPath = outputPath };
 }
 
+// MOMO_SCREENSHOT=<image.jpg> saves a path traced frame from the scene's camera and
+// exits; MOMO_SCREENSHOT_SAMPLES=<n> sets how many samples it averages (default 256)
+std::optional<Momo::ScreenshotSpecification> GetScreenshotFromEnvironment()
+{
+    const char* outputPath = std::getenv("MOMO_SCREENSHOT");
+    if (!outputPath || outputPath[0] == '\0') {
+        return std::nullopt;
+    }
+    Momo::ScreenshotSpecification screenshot{ .OutputPath = outputPath };
+    if (const char* samples = std::getenv("MOMO_SCREENSHOT_SAMPLES")) {
+        screenshot.Samples = static_cast<uint32_t>(std::max(1, std::atoi(samples)));
+    }
+    return screenshot;
+}
+
+#ifdef MOMO_EDITOR
+bool HasFlag(int argc, char** argv, const char* flag)
+{
+    for (int i = 1; i < argc; ++i)
+        if (strcmp(argv[i], flag) == 0)
+            return true;
+    return false;
+}
+#endif
+
 int main(int argc, char** argv)
 {
     // Read command-line arguments (if any)
@@ -116,12 +147,18 @@ int main(int argc, char** argv)
     appSpec.WindowSpec.Height = 1080;
     appSpec.InitialRenderMode = GetRenderModeFromEnvironment();
     appSpec.Benchmark = GetBenchmarkFromEnvironment();
+    appSpec.Screenshot = GetScreenshotFromEnvironment();
     if (auto scenePath = GetScenePathFromCommandLine(argc, argv)) {
         appSpec.ScenePath = *scenePath;
     }
 
     Momo::Application app(appSpec);
     app.PushLayer<AppLayer>();
+#ifdef MOMO_EDITOR
+    // F1 switches between the scene running and editing it; --editor starts in the editor
+    if (!appSpec.Benchmark && !appSpec.Screenshot)
+        app.PushLayer<Momo::Editor::EditorLayer>(Momo::Editor::EditorSpecification{ .StartEditing = HasFlag(argc, argv, "--editor") });
+#endif
     app.Run();
 
     // Explicitly shutdown before destruction

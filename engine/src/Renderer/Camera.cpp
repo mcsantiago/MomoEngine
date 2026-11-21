@@ -23,11 +23,13 @@ void Camera::OnUpdate(float deltaTime, const Input::InputState& inputState) {
         m_FirstMouse = false;
     }
 
-    // The cursor position keeps changing while other windows have focus; only
-    // turn the camera for movement made while ours does. Tracking the position
-    // regardless keeps the camera from jumping when focus comes back.
-    int deltaX = inputState.windowFocused ? inputState.mouseX - m_LastMouseX : 0;
-    int deltaY = inputState.windowFocused ? inputState.mouseY - m_LastMouseY : 0;
+    // The cursor position keeps changing while other windows have focus, or
+    // while it is released for the UI; only turn the camera for movement made
+    // while ours has focus and the cursor is captured. Tracking the position
+    // regardless keeps the camera from jumping when either comes back.
+    bool mouseLook = inputState.windowFocused && inputState.cursorCaptured;
+    int deltaX = mouseLook ? inputState.mouseX - m_LastMouseX : 0;
+    int deltaY = mouseLook ? inputState.mouseY - m_LastMouseY : 0;
     m_LastMouseX = inputState.mouseX;
     m_LastMouseY = inputState.mouseY;
 
@@ -46,6 +48,11 @@ void Camera::SetPose(glm::vec3 position, float yaw, float pitch) {
     m_Yaw = yaw;
     m_Pitch = pitch;
     UpdateCameraVectors(0, 0);
+}
+
+void Camera::LookAt(glm::vec3 position, glm::vec3 target) {
+    Camera aligned = LookingAlong(position, m_WorldUp, glm::normalize(target - position));
+    SetPose(position, aligned.m_Yaw, aligned.m_Pitch);
 }
 
 glm::mat4 Camera::GetViewMatrix() const {

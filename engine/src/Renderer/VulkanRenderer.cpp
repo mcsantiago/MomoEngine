@@ -4,6 +4,7 @@
 #include "Momo/Logging/Logger.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
+#include <imgui_impl_vulkan.h>
 #include <stdexcept>
 #include <vector>
 #include <fstream>
@@ -184,6 +185,10 @@ namespace Renderer {
         PickPhysicalDevice();
         LOG_DEBUG("VulkanRenderer", "Creating logical device...");
         CreateLogicalDevice();
+        LOG_DEBUG("VulkanRenderer", "Creating command pool...");
+        CreateCommandPool();
+        LOG_DEBUG("VulkanRenderer", "Creating frame lighting resources...");
+        CreateFrameResources();
         LOG_DEBUG("VulkanRenderer", "Checking timestamp support...");
         CheckTimestampSupport();        // TODO: Maybe this should be checked only if GPU timing is enabled in the config
         LOG_DEBUG("VulkanRenderer", "Createing timestamp query pool...");
@@ -196,14 +201,15 @@ namespace Renderer {
         CreateDescriptorSetLayout();
         LOG_DEBUG("VulkanRenderer", "Creating graphics pipeline...");
         CreateGraphicsPipeline();
+        CreateCompositePipeline();
+        CreateShadowPipeline();
+        CreateOcclusionPipelines();
         LOG_DEBUG("VulkanRenderer", "Checking ray tracing support...");
         CheckRayTracingSupport();
         if (m_RayTracingSupported) {
             CreateRayTracingPipeline();
             CreateRayTracingImages();
         }
-        LOG_DEBUG("VulkanRenderer", "Creating command pool...");
-        CreateCommandPool();
         LOG_DEBUG("VulkanRenderer", "Creating command buffers...");
         CreateCommandBuffers();
         LOG_DEBUG("VulkanRenderer", "Creating synchronization objects...");
@@ -306,8 +312,13 @@ namespace Renderer {
         // Explicitly reset the optional to destroy the instance now
         // This also implicitly destroys the VkPhysicalDevice so no need to set it here
         m_Device->waitIdle();
+        if (m_ImGuiInitialized) {
+            ImGui_ImplVulkan_Shutdown();
+            m_ImGuiInitialized = false;
+        }
         m_DescriptorAllocator.Destroy();
         m_RayTracingDescriptorAllocator.Destroy();
+        m_FrameDescriptorAllocator.Destroy();
     }
 
     vk::raii::CommandBuffer VulkanRenderer::BeginSingleUseCommandBuffer()
@@ -358,6 +369,17 @@ namespace Renderer {
 
     void VulkanRenderer::RecordRasterPass(uint32_t imageIndex, const VulkanModelData& modelData, const glm::mat4& viewMatrix, const glm::mat4& modelMatrix)
     {
+        if (m_Lighting.shadows) {
+            RecordShadowPass(modelData, modelMatrix);
+        }
+        RecordPointShadowPasses(modelData, modelMatrix);
+        // With the prepass, depth is already drawn and ready as an attachment
+        const bool depthPrepass = m_Lighting.ambientOcclusion;
+        if (depthPrepass) {
+            RecordDepthPrepass(modelData, viewMatrix, modelMatrix);
+            RecordOcclusionPass();
+        }
+
         vk::ImageMemoryBarrier2 toColorAttachment{};
         toColorAttachment.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
         toColorAttachment.srcAccessMask = {};
@@ -375,8 +397,10 @@ namespace Renderer {
         };
 
         vk::ImageMemoryBarrier2 toDepthAttachment{};
-        // The depth buffer is shared by all frames in flight, so wait for the previous frame's depth writes
-        toDepthAttachment.srcStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests;
+        // The depth buffer is shared by all frames in flight, so wait for the
+        // previous frame's depth writes and the composite pass's reads
+        toDepthAttachment.srcStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests
+                                       | vk::PipelineStageFlagBits2::eFragmentShader;
         toDepthAttachment.srcAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
         toDepthAttachment.dstStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests;
         toDepthAttachment.dstAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
@@ -391,10 +415,23 @@ namespace Renderer {
             1                                 // layerCount
         };
 
+        // Shared like the depth buffer; every pixel is cleared, so the old contents can go
+        vk::ImageMemoryBarrier2 toNormalAttachment{};
+        toNormalAttachment.srcStageMask = vk::PipelineStageFlagBits2::eFragmentShader;
+        toNormalAttachment.srcAccessMask = {};
+        toNormalAttachment.dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+        toNormalAttachment.dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+        toNormalAttachment.oldLayout = vk::ImageLayout::eUndefined;
+        toNormalAttachment.newLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        toNormalAttachment.image = *m_NormalBuffer->image;
+        toNormalAttachment.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+        std::vector<vk::ImageMemoryBarrier2> imageBarriers{ toColorAttachment, toNormalAttachment };
+        if (!depthPrepass) {
+            imageBarriers.push_back(toDepthAttachment);
+        }
         vk::DependencyInfo dependencyInfo{};
-        dependencyInfo.imageMemoryBarrierCount = 2;
-        vk::ImageMemoryBarrier2 imageBarriers[] = { toColorAttachment, toDepthAttachment };
-        dependencyInfo.pImageMemoryBarriers = imageBarriers;
+        dependencyInfo.setImageMemoryBarriers(imageBarriers);
 
         m_CommandBuffers[m_CurrentFrame].pipelineBarrier2(dependencyInfo);
 
@@ -410,15 +447,22 @@ namespace Renderer {
         vk::RenderingAttachmentInfo depthAttachment{};
         depthAttachment.imageView = *m_DepthBuffer->imageView;
         depthAttachment.imageLayout = vk::ImageLayout::eDepthAttachmentOptimal;
-        depthAttachment.loadOp = vk::AttachmentLoadOp::eClear;
+        depthAttachment.loadOp = depthPrepass ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear;
         depthAttachment.storeOp = vk::AttachmentStoreOp::eStore;
         depthAttachment.clearValue = vk::ClearValue().setDepthStencil({1.0f, 0});
 
+        vk::RenderingAttachmentInfo normalAttachment{};
+        normalAttachment.imageView = *m_NormalBuffer->imageView;
+        normalAttachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        normalAttachment.loadOp = vk::AttachmentLoadOp::eClear;
+        normalAttachment.storeOp = vk::AttachmentStoreOp::eStore;
+        normalAttachment.clearValue = vk::ClearValue().setColor(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f});
+
+        std::array<vk::RenderingAttachmentInfo, 2> colorAttachments{ colorAttachment, normalAttachment };
         vk::RenderingInfo renderingInfo{};
         renderingInfo.renderArea = vk::Rect2D({0,0}, m_SwapchainExtent);
         renderingInfo.layerCount = 1;
-        renderingInfo.colorAttachmentCount = 1;
-        renderingInfo.pColorAttachments = &colorAttachment;
+        renderingInfo.setColorAttachments(colorAttachments);
         renderingInfo.pDepthAttachment = &depthAttachment;
 
         m_CommandBuffers[m_CurrentFrame].beginRendering(renderingInfo);
@@ -432,6 +476,7 @@ namespace Renderer {
             0.0f, 1.0f));
 
         m_CommandBuffers[m_CurrentFrame].setScissor(0, vk::Rect2D({0, 0}, m_SwapchainExtent));
+        m_CommandBuffers[m_CurrentFrame].bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **m_PipelineLayout, 1, m_FrameDescriptorSets[m_CurrentFrame], nullptr);
 
         for (const auto& mesh : modelData.meshes) {
             m_CommandBuffers[m_CurrentFrame].setCullMode(mesh.materialData.doubleSided ? vk::CullModeFlagBits::eNone : vk::CullModeFlagBits::eBack);
@@ -458,17 +503,18 @@ namespace Renderer {
         }
 
         m_CommandBuffers[m_CurrentFrame].endRendering();
+        RecordCompositePass(imageIndex);
     }
 
-    void VulkanRenderer::EndFrame(uint32_t imageIndex, RenderMode mode)
+    void VulkanRenderer::EndFrame(uint32_t imageIndex, bool swapchainIsTransferDst, RenderMode mode)
     {
         // Implementation for ending a frame
         LOG_DEBUG("VulkanRenderer", "Ending a frame...");
 
-        // Transition the swapchain image to present layout. The raster pass
-        // leaves it as a color attachment; the ray tracing pass as a blit target.
+        // Transition the swapchain image to present layout. The raster and UI
+        // passes leave it as a color attachment; the ray tracing pass as a blit target.
         vk::ImageMemoryBarrier2 toPresent{};
-        if (mode == RenderMode::RayTraced) {
+        if (swapchainIsTransferDst) {
             toPresent.srcStageMask = vk::PipelineStageFlagBits2::eBlit;
             toPresent.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
             toPresent.oldLayout = vk::ImageLayout::eTransferDstOptimal;
@@ -577,14 +623,17 @@ namespace Renderer {
                 }
             }
             BeginFrame();
+            RecordBufferUpdates();
+            WriteFrameUniforms(viewMatrix, mode);
 
             if (mode == RenderMode::RayTraced) {
                 RecordRayTracingPass(imageIndex, viewMatrix);
             } else {
                 RecordRasterPass(imageIndex, modelData, viewMatrix, modelMatrix);
             }
+            bool uiDrawn = RecordUiPass(imageIndex, mode);
 
-            EndFrame(imageIndex, mode);
+            EndFrame(imageIndex, mode == RenderMode::RayTraced && !uiDrawn, mode);
             frameTime.gpuFrameMs = m_LastGpuFrameMs;
             frameTime.hasRayTracingMs = m_LastRayTracingMs.has_value();
             frameTime.rayTracingMs = m_LastRayTracingMs.value_or(0.0);
@@ -633,7 +682,8 @@ namespace Renderer {
 
     VulkanMaterialData VulkanRenderer::CreateVulkanMaterialData(const AllocatedImage& baseColorTexture, const MaterialParams& materialParams, bool doubleSided)
     {
-        auto ubo = CreateBuffer(&materialParams, sizeof(MaterialParams), vk::BufferUsageFlagBits::eUniformBuffer, 0);
+        // Transfer dst: UpdateMaterial rewrites it from the command buffer
+        auto ubo = CreateBuffer(&materialParams, sizeof(MaterialParams), vk::BufferUsageFlagBits::eUniformBuffer | vk::BufferUsageFlagBits::eTransferDst, 0);
         auto descriptorSet = m_DescriptorAllocator.AllocateDescriptorSet(**m_DescriptorSetLayout);
         WriteDescriptorSet(descriptorSet, ubo, baseColorTexture);
         return VulkanMaterialData{ 
@@ -641,6 +691,51 @@ namespace Renderer {
             .descriptorSet=descriptorSet, 
             .paramsBuffer=std::move(ubo)
         };
+    }
+
+    void VulkanRenderer::UpdateMaterial(Assets::MaterialHandle handle, const VulkanMaterialData& rasterMaterial, const Assets::Material& material)
+    {
+        auto bytesOf = [](const auto& value) {
+            const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+            return std::vector<uint8_t>(bytes, bytes + sizeof(value));
+        };
+        m_PendingBufferUpdates.push_back({ *rasterMaterial.paramsBuffer.buffer, 0, bytesOf(ToMaterialParams(material)) });
+
+        m_EmissiveOverrides[handle] = material.emissive;
+        auto it = std::find(m_RayTracingMaterialHandles.begin(), m_RayTracingMaterialHandles.end(), handle);
+        if (m_RayTracingScene && it != m_RayTracingMaterialHandles.end()) {
+            size_t index = static_cast<size_t>(it - m_RayTracingMaterialHandles.begin());
+            m_RayTracingMaterials[index].emissive = glm::vec4(material.emissive, 0.0f);
+            m_PendingBufferUpdates.push_back({ *m_RayTracingScene->materials.buffer, index * sizeof(RayTracing::RayTracingMaterial), bytesOf(m_RayTracingMaterials[index]) });
+            m_AccumulatedSamples = 0;
+        }
+    }
+
+    void VulkanRenderer::RecordBufferUpdates()
+    {
+        if (m_PendingBufferUpdates.empty()) {
+            return;
+        }
+        auto& commandBuffer = m_CommandBuffers[m_CurrentFrame];
+        constexpr vk::PipelineStageFlags2 readers = vk::PipelineStageFlagBits2::eVertexShader | vk::PipelineStageFlagBits2::eFragmentShader
+                                                  | vk::PipelineStageFlagBits2::eComputeShader;
+
+        // Earlier frames' shaders may still be reading the old contents
+        vk::MemoryBarrier2 beforeUpdate(readers, {}, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+        vk::DependencyInfo before{};
+        before.setMemoryBarriers(beforeUpdate);
+        commandBuffer.pipelineBarrier2(before);
+
+        for (const PendingBufferUpdate& update : m_PendingBufferUpdates) {
+            commandBuffer.updateBuffer<uint8_t>(update.buffer, update.offset, update.data);
+        }
+        m_PendingBufferUpdates.clear();
+
+        vk::MemoryBarrier2 afterUpdate(vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                                       readers, vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eShaderStorageRead);
+        vk::DependencyInfo after{};
+        after.setMemoryBarriers(afterUpdate);
+        commandBuffer.pipelineBarrier2(after);
     }
 
     void VulkanRenderer::WriteDescriptorSet(const vk::DescriptorSet descriptorSet, const AllocatedBuffer& ubo,  const AllocatedImage& textureImage)
@@ -801,7 +896,8 @@ namespace Renderer {
             1,
             vk::SampleCountFlagBits::e1,
             vk::ImageTiling::eOptimal,
-            vk::ImageUsageFlagBits::eDepthStencilAttachment,
+            // Sampled: the composite pass finds outlines in it
+            vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eSampled,
             vk::SharingMode::eExclusive,
             0,
             nullptr,
@@ -956,11 +1052,13 @@ namespace Renderer {
         );
         LOG_DEBUG("VulkanRenderer", "Color blending state configured (no blending)");
 
+        // Color and normals: neither blends
+        std::array<vk::PipelineColorBlendAttachmentState, 2> colorBlendAttachments{ colorBlendAttachment, colorBlendAttachment };
         vk::PipelineColorBlendStateCreateInfo colorBlending(
             {},                              // flags
             VK_FALSE,                        // logicOpEnable
             vk::LogicOp::eCopy,             // logicOp
-            1, &colorBlendAttachment,       // attachmentCount, pAttachments
+            static_cast<uint32_t>(colorBlendAttachments.size()), colorBlendAttachments.data(), // attachmentCount, pAttachments
             {0.0f, 0.0f, 0.0f, 0.0f}        // blendConstants
         );
         LOG_DEBUG("VulkanRenderer", "Color blend state configured");
@@ -985,9 +1083,11 @@ namespace Renderer {
             static_cast<uint32_t>(sizeof(PushConstantData))                  // size
         );
 
+        // Set 0: the mesh's material. 1: the frame's lighting (lighting.slang)
+        std::array<vk::DescriptorSetLayout, 2> setLayouts{ **m_DescriptorSetLayout, **m_FrameSetLayout };
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo(
             {},         // flags
-            1, &**m_DescriptorSetLayout, // setLayoutCount, pSetLayouts (descriptor sets)
+            static_cast<uint32_t>(setLayouts.size()), setLayouts.data(), // setLayoutCount, pSetLayouts (descriptor sets)
             1, &pushConstantRange // pushConstantRangeCount, pPushConstantRanges
         );
         m_PipelineLayout = vk::raii::PipelineLayout(m_Device.value(), pipelineLayoutInfo);
@@ -996,10 +1096,11 @@ namespace Renderer {
         // ═══════════════════════════════════════════════════════════
         // 10. DYNAMIC RENDERING INFO (Vulkan 1.3 - replaces render passes)
         // ═══════════════════════════════════════════════════════════
-        vk::Format colorFormat = m_SwapchainImageFormat.format;
+        // Color, and world-space normals for the composite pass's outlines
+        std::array<vk::Format, 2> colorFormats{ m_SwapchainImageFormat.format, NormalBufferFormat };
         vk::PipelineRenderingCreateInfo renderingInfo(
             {},                           // flags
-            1, &colorFormat,             // viewMask, colorAttachmentCount, pColorAttachmentFormats
+            static_cast<uint32_t>(colorFormats.size()), colorFormats.data(), // viewMask, colorAttachmentCount, pColorAttachmentFormats
             m_DepthFormat,      // depthAttachmentFormat
             vk::Format::eUndefined       // stencilAttachmentFormat
         );
@@ -1009,7 +1110,7 @@ namespace Renderer {
             {},                          // flags
             VK_TRUE,                     // depthTestEnable
             VK_TRUE,                     // depthWriteEnable
-            vk::CompareOp::eLess,        // depthCompareOp
+            vk::CompareOp::eLessOrEqual, // depthCompareOp: equal passes the depth prepass's own values
             VK_FALSE,                    // depthBoundsTestEnable
             VK_FALSE                     // stencilTestEnable
         );
@@ -1127,7 +1228,10 @@ namespace Renderer {
         m_SwapchainExtent = ChooseSwapExtent(surfaceCapabilities, m_Window->GetWidth(), m_Window->GetHeight());
         LOG_DEBUG("VulkanRenderer", "\tChosen swapchain extent: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
         m_DepthBuffer = CreateDepthBuffer();
-        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), 0.1f, 100.0f);
+        m_NormalBuffer = CreateNormalBuffer();
+        WriteCompositeDescriptorSet();
+        CreateOcclusionImages();
+        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), NearPlane, FarPlane);
         m_ProjectionMatrix[1][1] *= -1; // Invert Y for Vulkan's coordinate system
 
         uint32_t minImageCount = (surfaceCapabilities.maxImageCount > 0) 
@@ -1185,7 +1289,7 @@ namespace Renderer {
         auto surfaceCapabilities = m_PhysicalDevice->getSurfaceCapabilitiesKHR(*m_Surface);
         m_SwapchainExtent = ChooseSwapExtent(surfaceCapabilities, m_Window->GetWidth(), m_Window->GetHeight());
         m_DepthBuffer = CreateDepthBuffer();
-        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), 0.1f, 100.0f);
+        m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), static_cast<float>(m_SwapchainExtent.width) / static_cast<float>(m_SwapchainExtent.height), NearPlane, FarPlane);
         m_ProjectionMatrix[1][1] *= -1; // Invert Y for Vulkan's coordinate system
         if (m_SwapchainExtent.width == 0 || m_SwapchainExtent.height == 0)
         {

@@ -24,13 +24,6 @@ struct RayTracingMaterial {
 };
 static_assert(sizeof(RayTracingMaterial) == 48, "RayTracingMaterial must match the std430 layout in the shader");
 
-// A point light in world space, as the compute shader reads it
-struct RayTracingPointLight {
-    glm::vec4 position;  // w unused
-    glm::vec4 intensity; // rgb: radiant intensity (see Assets::PointLight); a unused
-};
-static_assert(sizeof(RayTracingPointLight) == 32, "RayTracingPointLight must match the std430 layout in the shader");
-
 // Everything the ray tracing compute shader reads about the scene's geometry,
 // already in the layout it is uploaded in: one world-space triangle list for
 // the whole scene (single-level compressed wide BVH) with both triangle arrays in BVH order.
@@ -40,15 +33,15 @@ struct SceneGeometry {
     std::vector<TrianglePositions> positions;
     std::vector<TriangleShading> shading;
     std::vector<RayTracingMaterial> materials;
+    std::vector<Assets::MaterialHandle> materialHandles; // Registry material of each entry of materials
     // Registry textures the materials sample, by slot; slot 0 is the default
     // white texture. The renderer binds their GPU images as an array.
     std::vector<Assets::TextureHandle> textures;
-    std::vector<RayTracingPointLight> pointLights;
 };
 
-// Flattens every mesh of every model in the scene into world space (the mesh's
-// localTransform; models have no transform of their own yet) and builds the
-// BVH over the result. Meshes without a material get a default white one.
+// Flattens every mesh of the scene's static instances into world space (the
+// instance's transform times the mesh's localTransform) and builds the BVH
+// over the result. Dynamic instances are left out. Meshes without a material get a default white one.
 SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Scene& scene);
 
 } // namespace Momo::RayTracing

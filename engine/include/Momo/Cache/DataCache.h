@@ -65,15 +65,9 @@ template <> struct GPUResourceTraits<Assets::MeshTag> {
 template <> struct GPUResourceTraits<Assets::MaterialTag> {
     using GPUType = VulkanMaterialData;
     static GPUType Create(const Assets::Material& material, GPUContext ctx) {
-        // Blend can stay "never discard" until it gets its own pipeline.
-        MaterialParams params = MaterialParams {
-            .baseColorFactor = material.baseColorFactor,
-            .alphaCutoff = (material.alphaMode == Assets::AlphaMode::Mask) ? material.alphaCutoff : -1.0f,
-            ._pad = {0,0,0}
-        };
         return ctx.renderer.CreateVulkanMaterialData(
                 ctx.textures->GetOrCreate(material.baseColorTextureHandle),
-                params, material.doubleSided);
+                ToMaterialParams(material), material.doubleSided);
     }
 };
 

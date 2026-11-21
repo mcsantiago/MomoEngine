@@ -8,6 +8,11 @@ add_library(MomoEngine STATIC
   src/Platform/GLFW/WindowVulkan.cpp
   src/Renderer/VulkanRenderer.cpp
   src/Renderer/VulkanRayTracing.cpp
+  src/Renderer/VulkanLighting.cpp
+  src/Renderer/VulkanUi.cpp
+  src/Renderer/VulkanShadows.cpp
+  src/Renderer/VulkanAmbientOcclusion.cpp
+  include/Momo/Renderer/Lighting.h
   include/Momo/Renderer/DescriptorAllocator.h
   src/Renderer/DescriptorAllocator.cpp
   include/Momo/Renderer/Camera.h
@@ -28,6 +33,8 @@ add_library(MomoEngine STATIC
   include/Momo/Cache/DataCache.h
   include/Momo/Cache/DataCache.h
   include/Momo/Core/Scene.h
+  include/Momo/Core/SceneFile.h
+  src/Core/SceneFile.cpp
   include/Momo/RayTracing/Bvh.h
   src/RayTracing/Bvh.cpp
   include/Momo/RayTracing/SceneGeometry.h
@@ -65,7 +72,24 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/nothings/stb.git
   GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
 )
-FetchContent_MakeAvailable(fastgltf glfw stb)
+
+# ----------- Dear ImGui (debug UI) via FetchContent -----------------
+# No CMakeLists of its own; the library is defined below, once Vulkan is found.
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG v1.92.9
+)
+
+# ----------- nlohmann/json (scene files) via FetchContent -----------------
+# The release's source tarball is a few hundred KB, unlike the full repository
+FetchContent_Declare(
+  nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+)
+FetchContent_MakeAvailable(fastgltf glfw stb imgui nlohmann_json)
+target_link_libraries(MomoEngine PRIVATE nlohmann_json::nlohmann_json)
 
 target_include_directories(MomoEngine PRIVATE ${stb_SOURCE_DIR})
 
@@ -87,12 +111,25 @@ find_package(Vulkan REQUIRED)
 # Link the Vulkan loader and GLFW
 # Use Vulkan::Vulkan to be cross-platform (Win: vulkan-1.lib, Linux: libvulkan.so, macOS: MoltenVK dylib)
 # Vulkan is PUBLIC because VulkanRenderer.h is included in public headers (Application.h)
+# Core plus the GLFW and Vulkan backends
+add_library(imgui STATIC
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+)
+target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
+
 target_link_libraries(MomoEngine
   PUBLIC
     Vulkan::Vulkan
   PRIVATE
     glfw
     fastgltf::fastgltf
+    imgui
 )
 
 # If your GLFW code includes <GLFW/glfw3.h> and you want it to include <vulkan/vulkan.h> for you:
@@ -169,7 +206,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -fvk-use-entrypoint-name
       -o ${VERT_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE}
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang ${SHADER_SOURCE_DIR}/common/surface.slang
     COMMENT "Compiling vertex shader: ${SHADER_NAME}.vert.spv"
     VERBATIM
   )
@@ -188,7 +225,7 @@ function(compile_slang_shader SHADER_SOURCE)
       -fvk-use-entrypoint-name
       -o ${FRAG_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE}
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/lighting.slang ${SHADER_SOURCE_DIR}/common/surface.slang
     COMMENT "Compiling fragment shader: ${SHADER_NAME}.frag.spv"
     VERBATIM
   )
@@ -227,7 +264,7 @@ function(compile_slang_compute_shader SHADER_SOURCE)
       ${DEFINE_ARG}
       -o ${COMP_OUTPUT}
       ${SHADER_SOURCE}
-    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/raytrace_traversal.slang
+    DEPENDS ${SHADER_SOURCE} ${SHADER_SOURCE_DIR}/common/raytrace_traversal.slang ${SHADER_SOURCE_DIR}/common/lighting.slang
     COMMENT "Compiling compute shader: ${OUTPUT_NAME}"
     VERBATIM
   )
@@ -235,13 +272,18 @@ function(compile_slang_compute_shader SHADER_SOURCE)
   set(COMPILED_SHADERS ${COMPILED_SHADERS} ${COMP_OUTPUT} PARENT_SCOPE)
 endfunction()
 
-# Compile triangle.slang and raytrace.slang
+# Compile the raster, composite and ray tracing shaders
 set(COMPILED_SHADERS "")
 compile_slang_shader(${SHADER_SOURCE_DIR}/common/triangle.slang)
+compile_slang_shader(${SHADER_SOURCE_DIR}/common/composite.slang)
+compile_slang_shader(${SHADER_SOURCE_DIR}/common/shadow.slang)
+compile_slang_shader(${SHADER_SOURCE_DIR}/common/prepass.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang counters COUNT_TRAVERSAL)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/raytrace.slang capture CAPTURE_RAYS)
 compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/traceonly.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/ssao.slang)
+compile_slang_compute_shader(${SHADER_SOURCE_DIR}/common/ssao.slang blur SSAO_BLUR)
 
 # Create custom target for all shaders
 add_custom_target(MomoShaders ALL

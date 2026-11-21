@@ -14,6 +14,12 @@ public:
     void OnUpdate(float deltaTime, const Input::InputState& inputState);
     // Places the camera directly (yaw and pitch in degrees), e.g. for benchmark views
     void SetPose(glm::vec3 position, float yaw, float pitch);
+    // Places the camera at position, looking at target (not straight above or below it)
+    void LookAt(glm::vec3 position, glm::vec3 target);
+
+    glm::vec3 GetPosition() const { return m_Position; }
+    glm::vec3 GetFront() const { return m_Front; }
+    void SetMovementSpeed(float unitsPerSecond) { m_MovementSpeed = unitsPerSecond; }
 
 private:
     void UpdateCameraVectors(int deltaX, int deltaY);
