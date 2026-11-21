@@ -101,7 +101,8 @@ namespace Momo
         }
         if (boundsMin.x <= boundsMax.x)
             m_Renderer.SetShadowBounds(boundsMin, boundsMax);
-        StartRayTracingGeometryBuild();
+        // The ray tracing geometry is built when Run starts, after the layers'
+        // OnAttach, so they can still load models into the registry
     }
 
     std::optional<Assets::ModelHandle> Application::LoadModel(const std::filesystem::path& path)
@@ -115,6 +116,11 @@ namespace Momo
             LOG_ERROR("Momo", "Failed to load model from path: {}", path.generic_string());
             return std::nullopt;
         }
+        // The ray tracing build reads the registry on a worker thread, and
+        // registering can reallocate it. Models loaded in OnAttach come before
+        // the build starts; any loaded later wait for it to finish.
+        if (m_PendingRayTracingGeometry.valid())
+            m_PendingRayTracingGeometry.wait();
         return m_AssetRegistry.RegisterModel(std::move(*source));
     }
 
@@ -208,6 +214,8 @@ namespace Momo
 
     void Application::Run()
     {
+        if (m_ActiveScene && !m_PendingRayTracingGeometry.valid())
+            StartRayTracingGeometryBuild();
         using clock = std::chrono::steady_clock;
         auto last = clock::now();
         auto frameStats = Profiling::FrameTime{};
