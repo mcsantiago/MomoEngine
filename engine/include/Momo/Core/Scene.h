@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -8,9 +10,14 @@
 #include "Momo/Assets/Handle.h"
 
 namespace Momo {
+// Names an instance for as long as it's in the scene. Never reused, and
+// unlike an index it survives other instances being removed.
+using EntityId = uint64_t;
+
 // One placement of a model in the scene
 struct SceneInstance
 {
+    EntityId id = 0; // Set by Scene::AddInstance
     Assets::ModelHandle model;
     glm::mat4 transform = glm::mat4(1.0f); // Model space to world space
     // Static instances make up the ray tracer's BVH and the collision
@@ -33,18 +40,27 @@ public:
     Scene() = default;
     ~Scene() = default;
 
-    // Returns the instance's index, for SetTransform
-    size_t AddInstance(SceneInstance instance) {
+    EntityId AddInstance(SceneInstance instance) {
+        instance.id = m_NextId++;
         m_Instances.push_back(std::move(instance));
-        return m_Instances.size() - 1;
+        return m_Instances.back().id;
     }
-    void SetTransform(size_t instance, const glm::mat4& transform) {
-        m_Instances[instance].transform = transform;
+    // Null if the instance has been removed
+    SceneInstance* Find(EntityId id) {
+        auto it = std::find_if(m_Instances.begin(), m_Instances.end(), [id](const SceneInstance& instance) { return instance.id == id; });
+        return it == m_Instances.end() ? nullptr : &*it;
+    }
+    const SceneInstance* Find(EntityId id) const {
+        return const_cast<Scene*>(this)->Find(id);
+    }
+    void Remove(EntityId id) {
+        std::erase_if(m_Instances, [id](const SceneInstance& instance) { return instance.id == id; });
     }
     const std::vector<SceneInstance>& GetInstances() const {
         return m_Instances;
     }
 private:
     std::vector<SceneInstance> m_Instances;
+    EntityId m_NextId = 1;
 };
 } // namespace Momo

@@ -196,6 +196,8 @@ public:
     uint32_t GetRayTracingMaxBounces() const { return m_RayTracingMaxBounces; }
     // Path traced frames averaged into the current image (0 after the view or lighting changed)
     uint32_t GetAccumulatedSamples() const { return m_AccumulatedSamples; }
+    // Clip space with Vulkan's conventions: y down, depth 0 to 1
+    const glm::mat4& GetProjectionMatrix() const { return m_ProjectionMatrix; }
     const RayTracingSceneBuffers* GetRayTracingScene() const { return m_RayTracingScene ? &*m_RayTracingScene : nullptr; }
     // While on, ray traced frames use the shader variant that counts its
     // traversal work. Slower, so benchmarks only switch it on after timing.

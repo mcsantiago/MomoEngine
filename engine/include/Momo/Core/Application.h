@@ -1,5 +1,7 @@
 #pragma once
 #include <array>
+#include <chrono>
+#include <unordered_map>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -14,6 +16,7 @@
 #include "Momo/Assets/AssetRegistry.h"
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Core/Scene.h"
+#include "Momo/Core/SceneFile.h"
 #include "Momo/Core/Benchmark.h"
 #include "Momo/RayTracing/WideBvh.h"
 
@@ -52,6 +55,12 @@ namespace Momo
         virtual void OnDetach() {}
         // Called every frame before the camera's own update and the draw
         virtual void OnUpdate(float dt) {}
+        // Called every frame (except in benchmarks) inside the Dear ImGui
+        // frame, to draw the layer's UI
+        virtual void OnImGui() {}
+        // Game layers stop updating while the application is in editing mode;
+        // an editor's own layer keeps going
+        virtual bool UpdatesWhileEditing() const { return false; }
     protected:
         // The application the layer was pushed onto (set before OnAttach)
         Application& App() { return *m_App; }
@@ -67,6 +76,21 @@ namespace Momo
         float distance;   // Along the ray, in world units
         glm::vec3 point;
         glm::vec3 normal; // Unit length, facing back along the ray
+    };
+
+    // A hit from Application::PickInstance
+    struct PickHit
+    {
+        EntityId entity;
+        float distance; // Along the ray, in units of the direction's length
+        glm::vec3 point;
+    };
+
+    // An axis-aligned box; empty (min > max) for a model with no vertices
+    struct Bounds
+    {
+        glm::vec3 min;
+        glm::vec3 max;
     };
 
     class Application {
@@ -88,18 +112,19 @@ namespace Momo
         // --- For layers ---------------------------------------------------
         const Input::InputState& GetInput() const { return m_InputState; }
         Camera& GetCamera() { return *m_Camera; }
+        const Camera& GetCamera() const { return *m_Camera; }
         // With the free camera off, the camera stays wherever a layer puts it
         // instead of flying around with WASD and the mouse
         void SetFreeCamera(bool enabled) { m_FreeCamera = enabled; }
         // Loads a glTF model into the asset registry without placing it (or
         // returns the one already loaded from that file)
         std::optional<Assets::ModelHandle> LoadModel(const std::filesystem::path& path);
-        // Places a model in the active scene; returns the instance's index for
-        // SetInstanceTransform. Only dynamic instances may be added after the
-        // scene has loaded (static ones would miss the ray tracer's BVH), and
-        // they aren't saved with the scene.
-        size_t AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform);
-        void SetInstanceTransform(size_t instance, const glm::mat4& transform);
+        // Places a model in the active scene for game code to move around
+        // (a character). It isn't saved with the scene, and it stays when
+        // another scene is opened.
+        EntityId AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform);
+        // Does nothing if the instance has been removed
+        void SetInstanceTransform(EntityId instance, const glm::mat4& transform);
         // The first hit along a ray (direction of unit length) against the
         // static scene, within maxDistance. The collision geometry is built
         // with the ray tracer's BVH on a worker thread, so there are no hits
@@ -107,8 +132,55 @@ namespace Momo
         std::optional<RaycastHit> Raycast(glm::vec3 origin, glm::vec3 direction, float maxDistance) const;
         bool IsCollisionReady() const { return m_Collision.has_value(); }
         // Writes the scene as a scene file: its entities where they are now,
-        // the current camera and the current sun and sky
+        // the scene camera and the current sun and sky
         bool SaveScene(const std::filesystem::path& path, std::string& error);
+
+        // --- For editors --------------------------------------------------
+        // Changing anything static rebuilds the ray tracing and collision
+        // geometry in the background, a moment after the last change. Until
+        // that finishes the ray traced view and Raycast show the old scene.
+        const Scene& GetScene() const { return *m_ActiveScene; }
+        // Adds an entity that is saved with the scene. Its asset path is
+        // relative to directory, unless it's absolute.
+        std::optional<EntityId> AddEntity(const EntityDescription& entity, const std::filesystem::path& directory = {});
+        void RemoveInstance(EntityId instance);
+        void SetInstanceStatic(EntityId instance, bool isStatic);
+        void SetInstanceName(EntityId instance, const std::string& name);
+        // The scene as it would be saved, with absolute asset paths
+        SceneDescription DescribeScene() const;
+        // Swaps the scene's saved entities for these (asset paths absolute),
+        // e.g. to undo. Returns the new ids in order, 0 for any that failed to load.
+        std::vector<EntityId> ReplaceEntities(const std::vector<EntityDescription>& entities);
+        // Replaces the saved entities, camera and lighting with a scene file's
+        // (or a single glTF file's). False, changing nothing, if it can't be read.
+        bool OpenScene(const std::filesystem::path& path);
+        void NewScene();
+        // The file SaveScene last wrote or the scene was opened from (for a
+        // glTF file, a scene file next to it)
+        const std::filesystem::path& GetScenePath() const { return m_SavePath; }
+        // Where the view starts when the scene is loaded
+        const SceneCameraDescription& GetSceneCamera() const { return m_SceneCamera; }
+        void SetSceneCamera(glm::vec3 position, glm::vec3 target) { m_SceneCamera = { position, target }; }
+        bool IsStaticGeometryCurrent() const { return !m_StaticGeometryChanged && !m_PendingRayTracingGeometry.valid(); }
+
+        // In editing mode game layers stop updating, the camera is left to
+        // the editor, the cursor is released and Escape no longer quits
+        void SetEditing(bool editing);
+        bool IsEditing() const { return m_Editing; }
+        void SetCursorCaptured(bool captured);
+        void SetSettingsVisible(bool visible) { m_ShowSettings = visible; }
+        bool IsSettingsVisible() const { return m_ShowSettings; }
+        void Quit() { m_Running = false; }
+
+        // The nearest instance, static or not, along a ray through the
+        // scene's triangles as they are right now. Meant for a click, not for
+        // every frame: it checks every triangle of each mesh the ray could hit.
+        // With savedOnly, instances game code added (a character) are ignored.
+        std::optional<PickHit> PickInstance(glm::vec3 origin, glm::vec3 direction, bool savedOnly = false) const;
+        // In the model's own space; move the corners by an instance's transform
+        Bounds GetModelBounds(Assets::ModelHandle model) const;
+        // Clip space with Vulkan's conventions: y down, depth 0 to 1
+        const glm::mat4& GetProjectionMatrix() const { return m_Renderer.GetProjectionMatrix(); }
         
         void Run();
         void Shutdown();
@@ -129,6 +201,18 @@ namespace Momo
         bool m_ToggleSettingsHeld = false;
         Renderer::SceneLighting m_Lighting;
         bool m_FreeCamera = true;
+        bool m_Editing = false;
+        SceneCameraDescription m_SceneCamera{ .position = { 0.0f, 2.0f, 0.0f }, .target = { 0.0f, 2.0f, -1.0f } };
+        bool m_StaticGeometryChanged = false;
+        std::chrono::steady_clock::time_point m_StaticRebuildAt{};
+        void MarkStaticGeometryChanged();
+        void RebuildStaticGeometryIfChanged();
+        void RemoveSavedInstances();
+        void RefreshLightsAndShadowBounds();
+        std::vector<Assets::PointLight> m_SceneLights; // As the entities' assets give them
+        bool m_LightsCollected = false;
+        mutable std::unordered_map<Assets::MeshHandle, Bounds> m_MeshBounds; // In each mesh's own space
+        const Bounds& GetMeshBounds(Assets::MeshHandle mesh) const;
         // CPU copy of the static scene's BVH and triangles, for Raycast
         struct CollisionGeometry
         {
@@ -187,7 +271,7 @@ namespace Momo
 
         Renderer::VulkanModelData LoadMesh(const std::filesystem::path &path);
         std::optional<Renderer::DrawFrameTime> Draw(float dt);
-        void LoadScene(const std::filesystem::path &path);
+        bool LoadScene(const std::filesystem::path &path);
         void ApplySceneLighting(const std::optional<Assets::SunSource>& sun, const Assets::SkySource& sky);
         void DrawSceneSection();
 

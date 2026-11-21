@@ -19,6 +19,7 @@ public:
 
     glm::vec3 GetPosition() const { return m_Position; }
     glm::vec3 GetFront() const { return m_Front; }
+    void SetMovementSpeed(float unitsPerSecond) { m_MovementSpeed = unitsPerSecond; }
 
 private:
     void UpdateCameraVectors(int deltaX, int deltaY);

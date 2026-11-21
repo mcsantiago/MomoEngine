@@ -48,6 +48,9 @@ namespace Momo
         }
         m_ModelLoader = std::unique_ptr<Assets::IModelLoader>(Assets::IModelLoader::CreateGltfModelLoader());
         m_AssetRegistry.Init();
+        // An empty scene, in case the one asked for doesn't load
+        m_ActiveScene = Scene();
+        m_Camera = Camera::LookingAlong(m_SceneCamera.position, glm::vec3(0.0f, 1.0f, 0.0f), glm::normalize(m_SceneCamera.target - m_SceneCamera.position));
         LoadScene(m_Spec.ScenePath);
     }
 
@@ -62,76 +65,74 @@ namespace Momo
         }
     }
 
-    void Application::LoadScene(const std::filesystem::path &path)
+    bool Application::LoadScene(const std::filesystem::path &path)
     {
         // A glTF file on its own is a scene of one entity
         SceneDescription description;
+        std::filesystem::path savePath;
         if (path.extension() == ".json")
         {
             std::string error;
             std::optional<SceneDescription> read = ReadSceneFile(path, error);
             if (!read) {
                 LOG_ERROR("Momo", "Failed to load scene: {}", error);
-                return;
+                return false;
             }
             description = std::move(*read);
-            m_SavePath = path;
+            savePath = path;
         }
         else
         {
+            if (!std::filesystem::exists(path)) {
+                LOG_ERROR("Momo", "Scene file does not exist: {}", path.generic_string());
+                return false;
+            }
             description.entities.push_back({ .name = path.stem().string(), .asset = path.filename() });
-            m_SavePath = path.parent_path() / (path.stem().string() + ".scene.json");
+            savePath = path.parent_path() / (path.stem().string() + ".scene.json");
         }
+        m_SavePath = savePath;
+        m_SavePathInput.fill('\0');
 
-        m_ActiveScene = Scene();
+        // Instances game code added (a player character) outlive the scene they were added to
+        if (!m_ActiveScene)
+            m_ActiveScene = Scene();
+        RemoveSavedInstances();
+
         // The first camera, sun and sky settings any asset brings, for whatever the scene file doesn't set
         std::optional<Assets::CameraSource> assetCamera;
         std::optional<Assets::SunSource> assetSun;
         Assets::SkySource assetSky;
-        std::vector<Assets::PointLight> pointLights;
         for (const EntityDescription& entity : description.entities)
         {
-            std::filesystem::path assetPath = path.parent_path() / entity.asset; // An absolute asset path stays as it is
-            const LoadedAsset* asset = LoadAsset(assetPath);
-            if (!asset)
+            std::optional<EntityId> id = AddEntity(entity, path.parent_path());
+            if (!id)
                 continue;
-            glm::mat4 transform = entity.Transform();
-            glm::mat3 rotation = glm::mat3(transform);
-            m_ActiveScene->AddInstance({ .model = asset->handle, .transform = transform, .isStatic = entity.isStatic,
-                                         .name = entity.name, .source = asset->path, .saved = true });
-
-            if (!assetCamera && asset->camera)
-                assetCamera = Assets::CameraSource{ .position = glm::vec3(transform * glm::vec4(asset->camera->position, 1.0f)),
-                                                    .forward = glm::normalize(rotation * asset->camera->forward) };
-            if (!assetSun && asset->sun)
+            const SceneInstance& instance = *m_ActiveScene->Find(*id);
+            const LoadedAsset& asset = m_LoadedAssets.at(instance.source);
+            glm::mat3 rotation = glm::mat3(instance.transform);
+            if (!assetCamera && asset.camera)
+                assetCamera = Assets::CameraSource{ .position = glm::vec3(instance.transform * glm::vec4(asset.camera->position, 1.0f)),
+                                                    .forward = glm::normalize(rotation * asset.camera->forward) };
+            if (!assetSun && asset.sun)
             {
-                assetSun = asset->sun;
-                assetSun->towardSun = glm::normalize(rotation * asset->sun->towardSun);
+                assetSun = asset.sun;
+                assetSun->towardSun = glm::normalize(rotation * asset.sun->towardSun);
             }
-            if (!assetSky.zenith) assetSky.zenith = asset->sky.zenith;
-            if (!assetSky.horizon) assetSky.horizon = asset->sky.horizon;
-            if (!assetSky.ground) assetSky.ground = asset->sky.ground;
-            if (!assetSky.exposure) assetSky.exposure = asset->sky.exposure;
-            for (Assets::PointLight light : m_AssetRegistry.Get(asset->handle).pointLights)
-            {
-                light.position = glm::vec3(transform * glm::vec4(light.position, 1.0f));
-                if (light.name.empty())
-                    light.name = entity.name;
-                pointLights.push_back(std::move(light));
-            }
+            if (!assetSky.zenith) assetSky.zenith = asset.sky.zenith;
+            if (!assetSky.horizon) assetSky.horizon = asset.sky.horizon;
+            if (!assetSky.ground) assetSky.ground = asset.sky.ground;
+            if (!assetSky.exposure) assetSky.exposure = asset.sky.exposure;
         }
-        if (m_ActiveScene->GetInstances().empty())
-            LOG_ERROR("Momo", "Scene {} has nothing to show", path.generic_string());
-        LOG_INFO("Momo", "Loaded scene {}: {} entities from {} assets", path.generic_string(), m_ActiveScene->GetInstances().size(), m_LoadedAssets.size());
+        LOG_INFO("Momo", "Loaded scene {}: {} entities", path.generic_string(), description.entities.size());
 
         constexpr glm::vec3 up(0.0f, 1.0f, 0.0f);
-        if (description.camera && glm::length(description.camera->target - description.camera->position) > 1e-4f) {
-            m_Camera = Camera::LookingAlong(description.camera->position, up, glm::normalize(description.camera->target - description.camera->position));
-        } else if (assetCamera) {
-            m_Camera = Camera::LookingAlong(assetCamera->position, up, assetCamera->forward);
-        } else {
-            m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), up, -90.0f, 0.0f);
-        }
+        if (description.camera && glm::length(description.camera->target - description.camera->position) > 1e-4f)
+            m_SceneCamera = *description.camera;
+        else if (assetCamera)
+            m_SceneCamera = SceneCameraDescription{ .position = assetCamera->position, .target = assetCamera->position + assetCamera->forward };
+        else
+            m_SceneCamera = SceneCameraDescription{ .position = { 0.0f, 2.0f, 0.0f }, .target = { 0.0f, 2.0f, -1.0f } };
+        m_Camera = Camera::LookingAlong(m_SceneCamera.position, up, glm::normalize(m_SceneCamera.target - m_SceneCamera.position));
 
         Assets::SkySource sky = description.sky;
         if (!sky.zenith) sky.zenith = assetSky.zenith;
@@ -140,32 +141,172 @@ namespace Momo
         if (!sky.exposure) sky.exposure = assetSky.exposure;
         ApplySceneLighting(description.sun ? description.sun : assetSun, sky);
 
-        m_Renderer.SetPointLights(pointLights);
-        CollectEditableLights(pointLights);
+        RefreshLightsAndShadowBounds();
+        // Build the ray tracing geometry right away rather than after the usual pause
+        MarkStaticGeometryChanged();
+        m_StaticRebuildAt = std::chrono::steady_clock::now();
+        return true;
+    }
 
-        // Sun shadows cover everything that doesn't move
+    bool Application::OpenScene(const std::filesystem::path& path)
+    {
+        return LoadScene(path);
+    }
+
+    void Application::NewScene()
+    {
+        RemoveSavedInstances();
+        m_SavePath = "Assets/Scenes/Untitled.scene.json";
+        m_SavePathInput.fill('\0');
+        RefreshLightsAndShadowBounds();
+    }
+
+    void Application::RemoveSavedInstances()
+    {
+        std::vector<EntityId> saved;
+        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
+            if (instance.saved)
+                saved.push_back(instance.id);
+        for (EntityId id : saved)
+            RemoveInstance(id);
+    }
+
+    // Point lights come from the entities' assets, moved with them, and sun
+    // shadows cover everything that doesn't move
+    void Application::RefreshLightsAndShadowBounds()
+    {
+        std::vector<Assets::PointLight> pointLights;
         glm::vec3 boundsMin(std::numeric_limits<float>::max());
         glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
         for (const SceneInstance& instance : m_ActiveScene->GetInstances())
         {
+            for (Assets::PointLight light : m_AssetRegistry.Get(instance.model).pointLights)
+            {
+                light.position = glm::vec3(instance.transform * glm::vec4(light.position, 1.0f));
+                if (light.name.empty())
+                    light.name = instance.name;
+                pointLights.push_back(std::move(light));
+            }
             if (!instance.isStatic)
                 continue;
-            for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(instance.model).meshes)
+            Bounds model = GetModelBounds(instance.model);
+            if (model.min.x > model.max.x)
+                continue;
+            for (int corner = 0; corner < 8; ++corner)
             {
-                const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
-                glm::mat4 toWorld = instance.transform * mesh.localTransform;
-                for (const Geometry::Vertex& vertex : mesh.meshData.vertices)
-                {
-                    glm::vec3 position = glm::vec3(toWorld * glm::vec4(vertex.position, 1.0f));
-                    boundsMin = glm::min(boundsMin, position);
-                    boundsMax = glm::max(boundsMax, position);
-                }
+                glm::vec3 local(corner & 1 ? model.max.x : model.min.x, corner & 2 ? model.max.y : model.min.y, corner & 4 ? model.max.z : model.min.z);
+                glm::vec3 world = glm::vec3(instance.transform * glm::vec4(local, 1.0f));
+                boundsMin = glm::min(boundsMin, world);
+                boundsMax = glm::max(boundsMax, world);
             }
         }
         if (boundsMin.x <= boundsMax.x)
             m_Renderer.SetShadowBounds(boundsMin, boundsMax);
-        // The ray tracing geometry is built when Run starts, after the layers'
-        // OnAttach, so they can still load models into the registry
+
+        // Leave the light editor's changes alone unless the scene's lights themselves changed
+        bool sameLights = pointLights.size() == m_SceneLights.size();
+        for (size_t i = 0; sameLights && i < pointLights.size(); ++i)
+            sameLights = pointLights[i].position == m_SceneLights[i].position && pointLights[i].intensity == m_SceneLights[i].intensity &&
+                         pointLights[i].name == m_SceneLights[i].name;
+        if (!sameLights || !m_LightsCollected)
+        {
+            m_SceneLights = pointLights;
+            m_LightsCollected = true;
+            m_Renderer.SetPointLights(pointLights);
+            CollectEditableLights(pointLights);
+        }
+    }
+
+    Bounds Application::GetModelBounds(Assets::ModelHandle model) const
+    {
+        Bounds bounds{ glm::vec3(std::numeric_limits<float>::max()), glm::vec3(std::numeric_limits<float>::lowest()) };
+        for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(model).meshes)
+        {
+            const Bounds& mesh = GetMeshBounds(meshHandle);
+            if (mesh.min.x > mesh.max.x)
+                continue;
+            const glm::mat4& toModel = m_AssetRegistry.Get(meshHandle).localTransform;
+            for (int corner = 0; corner < 8; ++corner)
+            {
+                glm::vec3 local(corner & 1 ? mesh.max.x : mesh.min.x, corner & 2 ? mesh.max.y : mesh.min.y, corner & 4 ? mesh.max.z : mesh.min.z);
+                glm::vec3 point = glm::vec3(toModel * glm::vec4(local, 1.0f));
+                bounds.min = glm::min(bounds.min, point);
+                bounds.max = glm::max(bounds.max, point);
+            }
+        }
+        return bounds;
+    }
+
+    const Bounds& Application::GetMeshBounds(Assets::MeshHandle mesh) const
+    {
+        auto it = m_MeshBounds.find(mesh);
+        if (it != m_MeshBounds.end())
+            return it->second;
+        Bounds bounds{ glm::vec3(std::numeric_limits<float>::max()), glm::vec3(std::numeric_limits<float>::lowest()) };
+        for (const Geometry::Vertex& vertex : m_AssetRegistry.Get(mesh).meshData.vertices)
+        {
+            bounds.min = glm::min(bounds.min, vertex.position);
+            bounds.max = glm::max(bounds.max, vertex.position);
+        }
+        return m_MeshBounds.emplace(mesh, bounds).first->second;
+    }
+
+    std::optional<PickHit> Application::PickInstance(glm::vec3 origin, glm::vec3 direction, bool savedOnly) const
+    {
+        std::optional<PickHit> nearest;
+        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
+        {
+            if (savedOnly && !instance.saved)
+                continue;
+            for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(instance.model).meshes)
+            {
+                const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
+                // The ray in the mesh's own space. The direction isn't
+                // renormalized, so distances along it stay world distances.
+                glm::mat4 toLocal = glm::inverse(instance.transform * mesh.localTransform);
+                glm::vec3 o = glm::vec3(toLocal * glm::vec4(origin, 1.0f));
+                glm::vec3 d = glm::mat3(toLocal) * direction;
+
+                // Skip the triangles unless the ray crosses the mesh's box (slab test)
+                const Bounds& bounds = GetMeshBounds(meshHandle);
+                glm::vec3 inverse = 1.0f / d;
+                glm::vec3 t0 = (bounds.min - o) * inverse;
+                glm::vec3 t1 = (bounds.max - o) * inverse;
+                glm::vec3 tNear = glm::min(t0, t1);
+                glm::vec3 tFar = glm::max(t0, t1);
+                float enter = std::max({ tNear.x, tNear.y, tNear.z, 0.0f });
+                float exit = std::min({ tFar.x, tFar.y, tFar.z });
+                if (!(enter <= exit) || (nearest && enter > nearest->distance))
+                    continue;
+
+                const std::vector<Geometry::Vertex>& vertices = mesh.meshData.vertices;
+                const std::vector<uint32_t>& indices = mesh.meshData.indices;
+                for (size_t i = 0; i + 2 < indices.size(); i += 3)
+                {
+                    // Moller-Trumbore, both sides
+                    const glm::vec3& v0 = vertices[indices[i]].position;
+                    glm::vec3 e1 = vertices[indices[i + 1]].position - v0;
+                    glm::vec3 e2 = vertices[indices[i + 2]].position - v0;
+                    glm::vec3 p = glm::cross(d, e2);
+                    float determinant = glm::dot(e1, p);
+                    if (std::abs(determinant) < 1e-12f)
+                        continue;
+                    float inverseDeterminant = 1.0f / determinant;
+                    glm::vec3 s = o - v0;
+                    float u = glm::dot(s, p) * inverseDeterminant;
+                    if (u < 0.0f || u > 1.0f)
+                        continue;
+                    glm::vec3 q = glm::cross(s, e1);
+                    float v = glm::dot(d, q) * inverseDeterminant;
+                    if (v < 0.0f || u + v > 1.0f)
+                        continue;
+                    float t = glm::dot(e2, q) * inverseDeterminant;
+                    if (t > 1e-4f && (!nearest || t < nearest->distance))
+                        nearest = PickHit{ .entity = instance.id, .distance = t, .point = origin + direction * t };
+                }
+            }
+        }
+        return nearest;
     }
 
     const Application::LoadedAsset* Application::LoadAsset(const std::filesystem::path& path)
@@ -203,9 +344,111 @@ namespace Momo
         return asset->handle;
     }
 
-    size_t Application::AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform)
+    EntityId Application::AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform)
     {
         return m_ActiveScene->AddInstance({ .model = model, .transform = transform, .isStatic = false, .name = {}, .source = {}, .saved = false });
+    }
+
+    std::optional<EntityId> Application::AddEntity(const EntityDescription& entity, const std::filesystem::path& directory)
+    {
+        const LoadedAsset* asset = LoadAsset(directory / entity.asset); // An absolute asset path stays as it is
+        if (!asset)
+            return std::nullopt;
+        if (entity.isStatic)
+            MarkStaticGeometryChanged();
+        return m_ActiveScene->AddInstance({ .model = asset->handle, .transform = entity.Transform(), .isStatic = entity.isStatic,
+                                            .name = entity.name, .source = asset->path, .saved = true });
+    }
+
+    void Application::RemoveInstance(EntityId id)
+    {
+        const SceneInstance* instance = m_ActiveScene->Find(id);
+        if (!instance)
+            return;
+        if (instance->isStatic)
+            MarkStaticGeometryChanged();
+        m_ActiveScene->Remove(id);
+    }
+
+    void Application::SetInstanceTransform(EntityId id, const glm::mat4& transform)
+    {
+        SceneInstance* instance = m_ActiveScene->Find(id);
+        if (!instance)
+            return;
+        instance->transform = transform;
+        if (instance->isStatic)
+            MarkStaticGeometryChanged();
+    }
+
+    void Application::SetInstanceStatic(EntityId id, bool isStatic)
+    {
+        SceneInstance* instance = m_ActiveScene->Find(id);
+        if (!instance || instance->isStatic == isStatic)
+            return;
+        instance->isStatic = isStatic;
+        MarkStaticGeometryChanged();
+    }
+
+    void Application::SetInstanceName(EntityId id, const std::string& name)
+    {
+        if (SceneInstance* instance = m_ActiveScene->Find(id))
+            instance->name = name;
+    }
+
+    std::vector<EntityId> Application::ReplaceEntities(const std::vector<EntityDescription>& entities)
+    {
+        RemoveSavedInstances();
+        std::vector<EntityId> ids;
+        for (const EntityDescription& entity : entities)
+            ids.push_back(AddEntity(entity).value_or(0));
+        return ids;
+    }
+
+    // Static geometry is rebuilt a moment after the last change, so dragging
+    // something around doesn't start a build per frame
+    void Application::MarkStaticGeometryChanged()
+    {
+        m_StaticGeometryChanged = true;
+        m_StaticRebuildAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    }
+
+    void Application::RebuildStaticGeometryIfChanged()
+    {
+        if (!m_StaticGeometryChanged || m_PendingRayTracingGeometry.valid() || std::chrono::steady_clock::now() < m_StaticRebuildAt)
+            return;
+        m_StaticGeometryChanged = false;
+        RefreshLightsAndShadowBounds();
+        bool anyStatic = std::any_of(m_ActiveScene->GetInstances().begin(), m_ActiveScene->GetInstances().end(),
+                                     [](const SceneInstance& instance) { return instance.isStatic; });
+        if (!anyStatic)
+        {
+            // Nothing to build a BVH over. The ray traced view keeps the last
+            // scene it was given, but there is nothing left to collide with.
+            m_Collision.reset();
+            return;
+        }
+        StartRayTracingGeometryBuild();
+    }
+
+    SceneDescription Application::DescribeScene() const
+    {
+        SceneDescription description;
+        description.camera = m_SceneCamera;
+        description.sun = Assets::SunSource{ .towardSun = m_Lighting.SunDirection(), .color = m_Lighting.sunColor, .intensity = m_Lighting.sunIntensity };
+        description.sky = Assets::SkySource{ .zenith = m_Lighting.skyZenith, .horizon = m_Lighting.skyHorizon,
+                                             .ground = m_Lighting.skyGround, .exposure = m_Lighting.exposure };
+        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
+        {
+            if (!instance.saved)
+                continue;
+            EntityDescription entity;
+            entity.name = instance.name;
+            entity.asset = instance.source;
+            entity.isStatic = instance.isStatic;
+            DecomposeTransform(instance.transform, entity.position, entity.rotation, entity.scale);
+            description.entities.push_back(std::move(entity));
+        }
+        return description;
     }
 
     bool Application::SaveScene(const std::filesystem::path& path, std::string& error)
@@ -214,43 +457,40 @@ namespace Momo
             error = "No scene is loaded";
             return false;
         }
-        SceneDescription description;
-        description.camera = SceneCameraDescription{ .position = m_Camera->GetPosition(), .target = m_Camera->GetPosition() + m_Camera->GetFront() };
-        description.sun = Assets::SunSource{ .towardSun = m_Lighting.SunDirection(), .color = m_Lighting.sunColor, .intensity = m_Lighting.sunIntensity };
-        description.sky = Assets::SkySource{ .zenith = m_Lighting.skyZenith, .horizon = m_Lighting.skyHorizon,
-                                             .ground = m_Lighting.skyGround, .exposure = m_Lighting.exposure };
-
+        SceneDescription description = DescribeScene();
         std::error_code ignored;
         std::filesystem::path directory = std::filesystem::weakly_canonical(std::filesystem::absolute(path), ignored).parent_path();
-        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
+        auto topFolder = [](const std::filesystem::path& p) {
+            std::filesystem::path below = p.relative_path();
+            return below.empty() ? std::filesystem::path() : *below.begin();
+        };
+        for (EntityDescription& entity : description.entities)
         {
-            if (!instance.saved)
-                continue;
-            EntityDescription entity;
-            entity.name = instance.name;
-            entity.isStatic = instance.isStatic;
             // Relative to the scene file, unless the two only share the root
             // (/home/... from /tmp/...), where an absolute path reads better
-            std::filesystem::path relative = instance.source.lexically_relative(directory);
-            auto topFolder = [](const std::filesystem::path& p) {
-                std::filesystem::path below = p.relative_path();
-                return below.empty() ? std::filesystem::path() : *below.begin();
-            };
-            bool sharesMoreThanRoot = instance.source.root_path() == directory.root_path() &&
-                                      !topFolder(directory).empty() && topFolder(instance.source) == topFolder(directory);
-            entity.asset = relative.empty() || !sharesMoreThanRoot ? instance.source : relative;
-            DecomposeTransform(instance.transform, entity.position, entity.rotation, entity.scale);
-            description.entities.push_back(std::move(entity));
+            std::filesystem::path relative = entity.asset.lexically_relative(directory);
+            bool sharesMoreThanRoot = entity.asset.root_path() == directory.root_path() &&
+                                      !topFolder(directory).empty() && topFolder(entity.asset) == topFolder(directory);
+            if (!relative.empty() && sharesMoreThanRoot)
+                entity.asset = relative;
         }
         if (!WriteSceneFile(description, path, error))
             return false;
+        m_SavePath = path;
+        m_SavePathInput.fill('\0');
         LOG_INFO("Momo", "Saved scene to {}", path.generic_string());
         return true;
     }
 
-    void Application::SetInstanceTransform(size_t instance, const glm::mat4& transform)
+    void Application::SetEditing(bool editing)
     {
-        m_ActiveScene->SetTransform(instance, transform);
+        m_Editing = editing;
+        m_Window->SetCursorCaptured(!editing && !m_ShowSettings);
+    }
+
+    void Application::SetCursorCaptured(bool captured)
+    {
+        m_Window->SetCursorCaptured(captured);
     }
 
     std::optional<RaycastHit> Application::Raycast(glm::vec3 origin, glm::vec3 direction, float maxDistance) const
@@ -333,8 +573,6 @@ namespace Momo
 
     void Application::Run()
     {
-        if (m_ActiveScene && !m_ActiveScene->GetInstances().empty() && !m_PendingRayTracingGeometry.valid())
-            StartRayTracingGeometryBuild();
         using clock = std::chrono::steady_clock;
         auto last = clock::now();
         auto frameStats = Profiling::FrameTime{};
@@ -352,7 +590,11 @@ namespace Momo
 
             m_Window->PollEvents();
             m_InputState = m_Window->ReadInput();
-            if (m_InputState.keys.IsKeyPressed(Input::Key::Escape))
+            // Typing into a text field isn't walking, quitting or switching modes
+            if (!m_Benchmark && ImGui::GetIO().WantTextInput)
+                m_InputState.keys = {};
+            // While editing, Escape belongs to the editor (deselect, cancel)
+            if (m_InputState.keys.IsKeyPressed(Input::Key::Escape) && !m_Editing)
             {
                 LOG_INFO("Momo", "Quit requested. Exiting main loop.");
                 m_Running = false;
@@ -360,6 +602,9 @@ namespace Momo
             }
 
             UploadRayTracingGeometryIfReady();
+            // Started here rather than when the scene loads so layers'
+            // OnAttach can still load models into the registry first
+            RebuildStaticGeometryIfChanged();
 
             bool toggleRenderMode = m_InputState.keys.IsKeyPressed(Input::Key::P);
             if (toggleRenderMode && !m_ToggleRenderModeHeld && !m_Benchmark && !m_Spec.Screenshot)
@@ -394,7 +639,8 @@ namespace Momo
             if (toggleSettings && !m_ToggleSettingsHeld && !m_Benchmark)
             {
                 m_ShowSettings = !m_ShowSettings;
-                m_Window->SetCursorCaptured(!m_ShowSettings);
+                if (!m_Editing)
+                    m_Window->SetCursorCaptured(!m_ShowSettings);
             }
             m_ToggleSettingsHeld = toggleSettings;
 
@@ -404,6 +650,8 @@ namespace Momo
                 ImGui_ImplVulkan_NewFrame();
                 ImGui_ImplGlfw_NewFrame();
                 ImGui::NewFrame();
+                for (auto& layer : m_Layers)
+                    layer->OnImGui();
                 if (m_ShowSettings)
                     DrawSettingsPanel();
                 ImGui::Render();
@@ -417,10 +665,12 @@ namespace Momo
 
             updateTimer.Start();
             for (auto& layer : m_Layers)
-                layer->OnUpdate(dt);
+                if (!m_Editing || layer->UpdatesWhileEditing())
+                    layer->OnUpdate(dt);
 
             // Benchmarks place the camera themselves and ignore input; screenshots keep the scene's camera
-            if (!m_Benchmark && !m_Spec.Screenshot && m_FreeCamera)
+            // While editing, the editor moves the camera
+            if (!m_Benchmark && !m_Spec.Screenshot && m_FreeCamera && !m_Editing)
                 m_Camera->OnUpdate(dt, m_InputState);
             else if (m_Benchmark && !m_Benchmark->IsFinished())
             {
@@ -595,8 +845,12 @@ namespace Momo
         if (ImGui::Button("Save scene"))
         {
             std::string error;
-            m_SaveStatus = SaveScene(m_SavePathInput.data(), error) ? "Saved" : error;
+            std::string path = m_SavePathInput.data(); // SaveScene resets the input
+            m_SaveStatus = SaveScene(path, error) ? "Saved" : error;
         }
+        if (ImGui::Button("Set scene camera from view"))
+            SetSceneCamera(m_Camera->GetPosition(), m_Camera->GetPosition() + m_Camera->GetFront());
+        ImGui::SetItemTooltip("Where the view starts when the scene is loaded");
         if (!m_SaveStatus.empty())
         {
             ImGui::SameLine();
