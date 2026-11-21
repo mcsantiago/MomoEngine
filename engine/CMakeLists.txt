@@ -33,6 +33,8 @@ add_library(MomoEngine STATIC
   include/Momo/Cache/DataCache.h
   include/Momo/Cache/DataCache.h
   include/Momo/Core/Scene.h
+  include/Momo/Core/SceneFile.h
+  src/Core/SceneFile.cpp
   include/Momo/RayTracing/Bvh.h
   src/RayTracing/Bvh.cpp
   include/Momo/RayTracing/SceneGeometry.h
@@ -78,7 +80,16 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/ocornut/imgui.git
   GIT_TAG v1.92.9
 )
-FetchContent_MakeAvailable(fastgltf glfw stb imgui)
+
+# ----------- nlohmann/json (scene files) via FetchContent -----------------
+# The release's source tarball is a few hundred KB, unlike the full repository
+FetchContent_Declare(
+  nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+)
+FetchContent_MakeAvailable(fastgltf glfw stb imgui nlohmann_json)
+target_link_libraries(MomoEngine PRIVATE nlohmann_json::nlohmann_json)
 
 target_include_directories(MomoEngine PRIVATE ${stb_SOURCE_DIR})
 

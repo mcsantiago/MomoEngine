@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <filesystem>
+#include <string>
 #include <vector>
 #include <glm/glm.hpp>
 #include "Momo/Assets/Handle.h"
@@ -16,6 +18,13 @@ struct SceneInstance
     // (characters, things that move) can be moved every frame, but so far
     // only the raster modes draw them.
     bool isStatic = true;
+
+    // Where the instance came from, for saving the scene
+    std::string name;
+    std::filesystem::path source; // The asset's glTF file
+    // Instances from the scene file are saved with it. Ones game code adds
+    // while running (a player character) aren't, or reloading would add them twice.
+    bool saved = true;
 };
 
 class Scene
@@ -25,8 +34,8 @@ public:
     ~Scene() = default;
 
     // Returns the instance's index, for SetTransform
-    size_t AddModel(const Assets::ModelHandle& model, const glm::mat4& transform = glm::mat4(1.0f), bool isStatic = true) {
-        m_Instances.push_back({ model, transform, isStatic });
+    size_t AddInstance(SceneInstance instance) {
+        m_Instances.push_back(std::move(instance));
         return m_Instances.size() - 1;
     }
     void SetTransform(size_t instance, const glm::mat4& transform) {

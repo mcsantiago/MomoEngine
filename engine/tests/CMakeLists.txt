@@ -11,6 +11,7 @@ add_executable(MomoEngineTests
   main.cpp
   BvhTests.cpp
   WideBvhTests.cpp
+  SceneFileTests.cpp
 )
 
 target_link_libraries(MomoEngineTests PRIVATE MomoEngine doctest::doctest)

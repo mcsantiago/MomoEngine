@@ -4,6 +4,7 @@
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Renderer/VulkanMeshData.h"
 #include "Momo/Renderer/VulkanRenderer.h"
+#include "Momo/Core/SceneFile.h"
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -63,40 +64,102 @@ namespace Momo
 
     void Application::LoadScene(const std::filesystem::path &path)
     {
-        const std::filesystem::path& modelPath = path;
+        // A glTF file on its own is a scene of one entity
+        SceneDescription description;
+        if (path.extension() == ".json")
+        {
+            std::string error;
+            std::optional<SceneDescription> read = ReadSceneFile(path, error);
+            if (!read) {
+                LOG_ERROR("Momo", "Failed to load scene: {}", error);
+                return;
+            }
+            description = std::move(*read);
+            m_SavePath = path;
+        }
+        else
+        {
+            description.entities.push_back({ .name = path.stem().string(), .asset = path.filename() });
+            m_SavePath = path.parent_path() / (path.stem().string() + ".scene.json");
+        }
 
-        if (!std::filesystem::exists(modelPath)) {
-            LOG_ERROR("Momo", "Model file does not exist: {}", modelPath.generic_string());
-            return;
-        }
         m_ActiveScene = Scene();
-        auto modelSource = m_ModelLoader->LoadModel(modelPath);
-        if (!modelSource.has_value()) {
-            LOG_ERROR("Momo", "Failed to load model from path: {}", modelPath.generic_string());
-            return;
+        // The first camera, sun and sky settings any asset brings, for whatever the scene file doesn't set
+        std::optional<Assets::CameraSource> assetCamera;
+        std::optional<Assets::SunSource> assetSun;
+        Assets::SkySource assetSky;
+        std::vector<Assets::PointLight> pointLights;
+        for (const EntityDescription& entity : description.entities)
+        {
+            std::filesystem::path assetPath = path.parent_path() / entity.asset; // An absolute asset path stays as it is
+            const LoadedAsset* asset = LoadAsset(assetPath);
+            if (!asset)
+                continue;
+            glm::mat4 transform = entity.Transform();
+            glm::mat3 rotation = glm::mat3(transform);
+            m_ActiveScene->AddInstance({ .model = asset->handle, .transform = transform, .isStatic = entity.isStatic,
+                                         .name = entity.name, .source = asset->path, .saved = true });
+
+            if (!assetCamera && asset->camera)
+                assetCamera = Assets::CameraSource{ .position = glm::vec3(transform * glm::vec4(asset->camera->position, 1.0f)),
+                                                    .forward = glm::normalize(rotation * asset->camera->forward) };
+            if (!assetSun && asset->sun)
+            {
+                assetSun = asset->sun;
+                assetSun->towardSun = glm::normalize(rotation * asset->sun->towardSun);
+            }
+            if (!assetSky.zenith) assetSky.zenith = asset->sky.zenith;
+            if (!assetSky.horizon) assetSky.horizon = asset->sky.horizon;
+            if (!assetSky.ground) assetSky.ground = asset->sky.ground;
+            if (!assetSky.exposure) assetSky.exposure = asset->sky.exposure;
+            for (Assets::PointLight light : m_AssetRegistry.Get(asset->handle).pointLights)
+            {
+                light.position = glm::vec3(transform * glm::vec4(light.position, 1.0f));
+                if (light.name.empty())
+                    light.name = entity.name;
+                pointLights.push_back(std::move(light));
+            }
         }
-        // Models have no transform of their own yet, so the camera's model space is world space
-        if (modelSource->camera.has_value()) {
-            m_Camera = Camera::LookingAlong(modelSource->camera->position, glm::vec3(0.0f, 1.0f, 0.0f), modelSource->camera->forward);
+        if (m_ActiveScene->GetInstances().empty())
+            LOG_ERROR("Momo", "Scene {} has nothing to show", path.generic_string());
+        LOG_INFO("Momo", "Loaded scene {}: {} entities from {} assets", path.generic_string(), m_ActiveScene->GetInstances().size(), m_LoadedAssets.size());
+
+        constexpr glm::vec3 up(0.0f, 1.0f, 0.0f);
+        if (description.camera && glm::length(description.camera->target - description.camera->position) > 1e-4f) {
+            m_Camera = Camera::LookingAlong(description.camera->position, up, glm::normalize(description.camera->target - description.camera->position));
+        } else if (assetCamera) {
+            m_Camera = Camera::LookingAlong(assetCamera->position, up, assetCamera->forward);
         } else {
-            m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
+            m_Camera = Camera(glm::vec3(0.0f, 2.0f, 0.0f), up, -90.0f, 0.0f);
         }
-        ApplySceneLighting(*modelSource);
-        Assets::ModelHandle handle = m_AssetRegistry.RegisterModel(std::move(*modelSource));
-        m_ActiveScene->AddModel(handle);
-        // Models have no transform of their own yet, so model space is world space
-        m_Renderer.SetPointLights(m_AssetRegistry.Get(handle).pointLights);
-        CollectEditableLights(handle);
+
+        Assets::SkySource sky = description.sky;
+        if (!sky.zenith) sky.zenith = assetSky.zenith;
+        if (!sky.horizon) sky.horizon = assetSky.horizon;
+        if (!sky.ground) sky.ground = assetSky.ground;
+        if (!sky.exposure) sky.exposure = assetSky.exposure;
+        ApplySceneLighting(description.sun ? description.sun : assetSun, sky);
+
+        m_Renderer.SetPointLights(pointLights);
+        CollectEditableLights(pointLights);
+
+        // Sun shadows cover everything that doesn't move
         glm::vec3 boundsMin(std::numeric_limits<float>::max());
         glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
-        for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(handle).meshes)
+        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
         {
-            const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
-            for (const Geometry::Vertex& vertex : mesh.meshData.vertices)
+            if (!instance.isStatic)
+                continue;
+            for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(instance.model).meshes)
             {
-                glm::vec3 position = glm::vec3(mesh.localTransform * glm::vec4(vertex.position, 1.0f));
-                boundsMin = glm::min(boundsMin, position);
-                boundsMax = glm::max(boundsMax, position);
+                const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
+                glm::mat4 toWorld = instance.transform * mesh.localTransform;
+                for (const Geometry::Vertex& vertex : mesh.meshData.vertices)
+                {
+                    glm::vec3 position = glm::vec3(toWorld * glm::vec4(vertex.position, 1.0f));
+                    boundsMin = glm::min(boundsMin, position);
+                    boundsMax = glm::max(boundsMax, position);
+                }
             }
         }
         if (boundsMin.x <= boundsMax.x)
@@ -105,28 +168,84 @@ namespace Momo
         // OnAttach, so they can still load models into the registry
     }
 
-    std::optional<Assets::ModelHandle> Application::LoadModel(const std::filesystem::path& path)
+    const Application::LoadedAsset* Application::LoadAsset(const std::filesystem::path& path)
     {
+        // Entities using the same file share one copy of it
+        std::error_code ignored;
+        std::filesystem::path key = std::filesystem::weakly_canonical(std::filesystem::absolute(path), ignored);
+        if (auto it = m_LoadedAssets.find(key); it != m_LoadedAssets.end())
+            return &it->second;
+
         if (!std::filesystem::exists(path)) {
             LOG_ERROR("Momo", "Model file does not exist: {}", path.generic_string());
-            return std::nullopt;
+            return nullptr;
         }
         auto source = m_ModelLoader->LoadModel(path);
         if (!source.has_value()) {
             LOG_ERROR("Momo", "Failed to load model from path: {}", path.generic_string());
-            return std::nullopt;
+            return nullptr;
         }
         // The ray tracing build reads the registry on a worker thread, and
         // registering can reallocate it. Models loaded in OnAttach come before
         // the build starts; any loaded later wait for it to finish.
         if (m_PendingRayTracingGeometry.valid())
             m_PendingRayTracingGeometry.wait();
-        return m_AssetRegistry.RegisterModel(std::move(*source));
+        LoadedAsset asset{ .path = key, .camera = source->camera, .sun = source->sun, .sky = source->sky, .handle = {} };
+        asset.handle = m_AssetRegistry.RegisterModel(std::move(*source));
+        return &m_LoadedAssets.emplace(key, std::move(asset)).first->second;
+    }
+
+    std::optional<Assets::ModelHandle> Application::LoadModel(const std::filesystem::path& path)
+    {
+        const LoadedAsset* asset = LoadAsset(path);
+        if (!asset)
+            return std::nullopt;
+        return asset->handle;
     }
 
     size_t Application::AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform)
     {
-        return m_ActiveScene->AddModel(model, transform, false);
+        return m_ActiveScene->AddInstance({ .model = model, .transform = transform, .isStatic = false, .name = {}, .source = {}, .saved = false });
+    }
+
+    bool Application::SaveScene(const std::filesystem::path& path, std::string& error)
+    {
+        if (!m_ActiveScene) {
+            error = "No scene is loaded";
+            return false;
+        }
+        SceneDescription description;
+        description.camera = SceneCameraDescription{ .position = m_Camera->GetPosition(), .target = m_Camera->GetPosition() + m_Camera->GetFront() };
+        description.sun = Assets::SunSource{ .towardSun = m_Lighting.SunDirection(), .color = m_Lighting.sunColor, .intensity = m_Lighting.sunIntensity };
+        description.sky = Assets::SkySource{ .zenith = m_Lighting.skyZenith, .horizon = m_Lighting.skyHorizon,
+                                             .ground = m_Lighting.skyGround, .exposure = m_Lighting.exposure };
+
+        std::error_code ignored;
+        std::filesystem::path directory = std::filesystem::weakly_canonical(std::filesystem::absolute(path), ignored).parent_path();
+        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
+        {
+            if (!instance.saved)
+                continue;
+            EntityDescription entity;
+            entity.name = instance.name;
+            entity.isStatic = instance.isStatic;
+            // Relative to the scene file, unless the two only share the root
+            // (/home/... from /tmp/...), where an absolute path reads better
+            std::filesystem::path relative = instance.source.lexically_relative(directory);
+            auto topFolder = [](const std::filesystem::path& p) {
+                std::filesystem::path below = p.relative_path();
+                return below.empty() ? std::filesystem::path() : *below.begin();
+            };
+            bool sharesMoreThanRoot = instance.source.root_path() == directory.root_path() &&
+                                      !topFolder(directory).empty() && topFolder(instance.source) == topFolder(directory);
+            entity.asset = relative.empty() || !sharesMoreThanRoot ? instance.source : relative;
+            DecomposeTransform(instance.transform, entity.position, entity.rotation, entity.scale);
+            description.entities.push_back(std::move(entity));
+        }
+        if (!WriteSceneFile(description, path, error))
+            return false;
+        LOG_INFO("Momo", "Saved scene to {}", path.generic_string());
+        return true;
     }
 
     void Application::SetInstanceTransform(size_t instance, const glm::mat4& transform)
@@ -150,22 +269,22 @@ namespace Momo
     }
 
     // A scene without its own sun or sky keeps the defaults (a sunset)
-    void Application::ApplySceneLighting(const Assets::ModelSource& model)
+    void Application::ApplySceneLighting(const std::optional<Assets::SunSource>& sun, const Assets::SkySource& sky)
     {
         Renderer::SceneLighting lighting{};
-        if (model.sun)
+        if (sun)
         {
             // Inverse of SceneLighting::SunDirection()
-            glm::vec3 toward = model.sun->towardSun;
+            glm::vec3 toward = sun->towardSun;
             lighting.sunElevation = glm::degrees(std::asin(std::clamp(toward.y, -1.0f, 1.0f)));
             lighting.sunAzimuth = glm::degrees(std::atan2(toward.z, toward.x));
-            lighting.sunColor = model.sun->color;
-            lighting.sunIntensity = model.sun->intensity;
+            lighting.sunColor = sun->color;
+            lighting.sunIntensity = sun->intensity;
         }
-        lighting.skyZenith = model.sky.zenith.value_or(lighting.skyZenith);
-        lighting.skyHorizon = model.sky.horizon.value_or(lighting.skyHorizon);
-        lighting.skyGround = model.sky.ground.value_or(lighting.skyGround);
-        lighting.exposure = model.sky.exposure.value_or(lighting.exposure);
+        lighting.skyZenith = sky.zenith.value_or(lighting.skyZenith);
+        lighting.skyHorizon = sky.horizon.value_or(lighting.skyHorizon);
+        lighting.skyGround = sky.ground.value_or(lighting.skyGround);
+        lighting.exposure = sky.exposure.value_or(lighting.exposure);
         m_Lighting = m_LoadedLighting = lighting;
     }
 
@@ -214,7 +333,7 @@ namespace Momo
 
     void Application::Run()
     {
-        if (m_ActiveScene && !m_PendingRayTracingGeometry.valid())
+        if (m_ActiveScene && !m_ActiveScene->GetInstances().empty() && !m_PendingRayTracingGeometry.valid())
             StartRayTracingGeometryBuild();
         using clock = std::chrono::steady_clock;
         auto last = clock::now();
@@ -384,10 +503,10 @@ namespace Momo
         }
     }
 
-    void Application::CollectEditableLights(Assets::ModelHandle model)
+    void Application::CollectEditableLights(const std::vector<Assets::PointLight>& pointLights)
     {
         m_PointLights.clear();
-        for (const Assets::PointLight& light : m_AssetRegistry.Get(model).pointLights)
+        for (const Assets::PointLight& light : pointLights)
         {
             EditablePointLight editable{ .name = light.name, .position = light.position };
             SplitColor(light.intensity, editable.color, editable.intensity);
@@ -396,16 +515,19 @@ namespace Momo
         m_LoadedPointLights = m_PointLights;
 
         m_Glows.clear();
-        for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(model).meshes)
+        for (const auto& [path, asset] : m_LoadedAssets)
         {
-            Assets::MaterialHandle materialHandle = m_AssetRegistry.Get(meshHandle).materialHandle;
-            const Assets::Material& material = m_AssetRegistry.Get(materialHandle);
-            bool known = std::any_of(m_Glows.begin(), m_Glows.end(), [&](const EditableGlow& glow) { return glow.handle == materialHandle; });
-            if (known || material.emissive == glm::vec3(0.0f))
-                continue;
-            EditableGlow glow{ .handle = materialHandle, .name = material.name };
-            SplitColor(material.emissive, glow.color, glow.strength);
-            m_Glows.push_back(glow);
+            for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(asset.handle).meshes)
+            {
+                Assets::MaterialHandle materialHandle = m_AssetRegistry.Get(meshHandle).materialHandle;
+                const Assets::Material& material = m_AssetRegistry.Get(materialHandle);
+                bool known = std::any_of(m_Glows.begin(), m_Glows.end(), [&](const EditableGlow& glow) { return glow.handle == materialHandle; });
+                if (known || material.emissive == glm::vec3(0.0f))
+                    continue;
+                EditableGlow glow{ .handle = materialHandle, .name = material.name };
+                SplitColor(material.emissive, glow.color, glow.strength);
+                m_Glows.push_back(glow);
+            }
         }
         m_LoadedGlows = m_Glows;
     }
@@ -460,6 +582,29 @@ namespace Momo
         ImGui::PopID();
     }
 
+    void Application::DrawSceneSection()
+    {
+        if (!ImGui::CollapsingHeader("Scene"))
+            return;
+        if (m_SavePathInput[0] == '\0')
+        {
+            std::string initial = m_SavePath.generic_string();
+            initial.copy(m_SavePathInput.data(), m_SavePathInput.size() - 1);
+        }
+        ImGui::InputText("File", m_SavePathInput.data(), m_SavePathInput.size());
+        if (ImGui::Button("Save scene"))
+        {
+            std::string error;
+            m_SaveStatus = SaveScene(m_SavePathInput.data(), error) ? "Saved" : error;
+        }
+        if (!m_SaveStatus.empty())
+        {
+            ImGui::SameLine();
+            ImGui::TextWrapped("%s", m_SaveStatus.c_str());
+        }
+        ImGui::TextDisabled("Relative paths are from the build directory, whose Assets\nare overwritten from the source tree on every build");
+    }
+
     void Application::DrawSettingsPanel()
     {
         ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
@@ -480,6 +625,8 @@ namespace Momo
             LOG_INFO("Momo", "Render mode: {}", Renderer::RenderModeName(m_RenderMode));
         }
         ImGui::Text("%.1f ms/frame (%.0f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+
+        DrawSceneSection();
 
         if (ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen))
         {

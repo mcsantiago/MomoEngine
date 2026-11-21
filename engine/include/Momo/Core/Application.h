@@ -1,5 +1,7 @@
 #pragma once
+#include <array>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 #include <utility>
@@ -30,8 +32,9 @@ namespace Momo
         std::string Name = "Untitled";
         WindowSpecification WindowSpec{};
         Renderer::RenderMode InitialRenderMode = Renderer::RenderMode::Raster; // Cycled at runtime with P
-        // glTF file to load, relative to the binary dir. Its first camera, if
-        // it has one, is where the view starts
+        // Scene to load, relative to the binary dir: a scene file (.json, see
+        // SceneFile.h) or a single glTF file. Its camera, if it has one, is
+        // where the view starts
         std::filesystem::path ScenePath = "Assets/Models/Sponza/Sponza.gltf";
         // Set to run the ray tracing benchmark instead of interactive mode; the app exits when done
         std::optional<BenchmarkSpecification> Benchmark;
@@ -88,11 +91,13 @@ namespace Momo
         // With the free camera off, the camera stays wherever a layer puts it
         // instead of flying around with WASD and the mouse
         void SetFreeCamera(bool enabled) { m_FreeCamera = enabled; }
-        // Loads a glTF model into the asset registry without placing it
+        // Loads a glTF model into the asset registry without placing it (or
+        // returns the one already loaded from that file)
         std::optional<Assets::ModelHandle> LoadModel(const std::filesystem::path& path);
         // Places a model in the active scene; returns the instance's index for
         // SetInstanceTransform. Only dynamic instances may be added after the
-        // scene has loaded (static ones would miss the ray tracer's BVH).
+        // scene has loaded (static ones would miss the ray tracer's BVH), and
+        // they aren't saved with the scene.
         size_t AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform);
         void SetInstanceTransform(size_t instance, const glm::mat4& transform);
         // The first hit along a ray (direction of unit length) against the
@@ -101,6 +106,9 @@ namespace Momo
         // until IsCollisionReady(). Alpha masked surfaces (leaves) count as solid.
         std::optional<RaycastHit> Raycast(glm::vec3 origin, glm::vec3 direction, float maxDistance) const;
         bool IsCollisionReady() const { return m_Collision.has_value(); }
+        // Writes the scene as a scene file: its entities where they are now,
+        // the current camera and the current sun and sky
+        bool SaveScene(const std::filesystem::path& path, std::string& error);
         
         void Run();
         void Shutdown();
@@ -151,7 +159,7 @@ namespace Momo
         };
         std::vector<EditablePointLight> m_PointLights, m_LoadedPointLights;
         std::vector<EditableGlow> m_Glows, m_LoadedGlows;
-        void CollectEditableLights(Assets::ModelHandle model);
+        void CollectEditableLights(const std::vector<Assets::PointLight>& pointLights);
         void ApplyGlow(const EditableGlow& glow);
         void DrawLightsSection();
 
@@ -180,7 +188,26 @@ namespace Momo
         Renderer::VulkanModelData LoadMesh(const std::filesystem::path &path);
         std::optional<Renderer::DrawFrameTime> Draw(float dt);
         void LoadScene(const std::filesystem::path &path);
-        void ApplySceneLighting(const Assets::ModelSource& model);
+        void ApplySceneLighting(const std::optional<Assets::SunSource>& sun, const Assets::SkySource& sky);
+        void DrawSceneSection();
+
+        // Every glTF file loaded, by absolute path, with the camera, sun and
+        // sky it brought (the registry keeps only the meshes, materials and lights)
+        struct LoadedAsset
+        {
+            std::filesystem::path path;
+            std::optional<Assets::CameraSource> camera;
+            std::optional<Assets::SunSource> sun;
+            Assets::SkySource sky;
+            Assets::ModelHandle handle;
+        };
+        std::map<std::filesystem::path, LoadedAsset> m_LoadedAssets;
+        const LoadedAsset* LoadAsset(const std::filesystem::path& path);
+        // Where the settings panel saves the scene: the scene file it came
+        // from, or one next to the glTF file it was
+        std::filesystem::path m_SavePath;
+        std::array<char, 1024> m_SavePathInput{};
+        std::string m_SaveStatus;
         void StartRayTracingGeometryBuild();
         void UploadRayTracingGeometryIfReady();
         void LoadDefaultAssets();
