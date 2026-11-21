@@ -86,6 +86,9 @@ namespace Momo
             if (glfwGetKey(m_Window, GLFW_KEY_TAB) == GLFW_PRESS) {
                 inputState.keys.SetKeyState(Input::Key::Tab, true);
             }
+            if (glfwGetKey(m_Window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(m_Window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) {
+                inputState.keys.SetKeyState(Input::Key::Shift, true);
+            }
             glfwGetCursorPos(m_Window, &inputState.mouseX, &inputState.mouseY);
             inputState.windowFocused = glfwGetWindowAttrib(m_Window, GLFW_FOCUSED) == GLFW_TRUE;
             inputState.cursorCaptured = glfwGetInputMode(m_Window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED;
@@ -119,6 +122,8 @@ namespace Momo
                 case GLFW_KEY_ESCAPE: return Input::Key::Escape;
                 case GLFW_KEY_P: return Input::Key::P;
                 case GLFW_KEY_TAB: return Input::Key::Tab;
+                case GLFW_KEY_LEFT_SHIFT:
+                case GLFW_KEY_RIGHT_SHIFT: return Input::Key::Shift;
                 default: return Input::Key::Escape; // Default fallback
             }
         }

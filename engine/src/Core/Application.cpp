@@ -104,6 +104,45 @@ namespace Momo
         StartRayTracingGeometryBuild();
     }
 
+    std::optional<Assets::ModelHandle> Application::LoadModel(const std::filesystem::path& path)
+    {
+        if (!std::filesystem::exists(path)) {
+            LOG_ERROR("Momo", "Model file does not exist: {}", path.generic_string());
+            return std::nullopt;
+        }
+        auto source = m_ModelLoader->LoadModel(path);
+        if (!source.has_value()) {
+            LOG_ERROR("Momo", "Failed to load model from path: {}", path.generic_string());
+            return std::nullopt;
+        }
+        return m_AssetRegistry.RegisterModel(std::move(*source));
+    }
+
+    size_t Application::AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform)
+    {
+        return m_ActiveScene->AddModel(model, transform, false);
+    }
+
+    void Application::SetInstanceTransform(size_t instance, const glm::mat4& transform)
+    {
+        m_ActiveScene->SetTransform(instance, transform);
+    }
+
+    std::optional<RaycastHit> Application::Raycast(glm::vec3 origin, glm::vec3 direction, float maxDistance) const
+    {
+        if (!m_Collision)
+            return std::nullopt;
+        RayTracing::Ray ray{ .origin = origin, .direction = direction };
+        std::optional<RayTracing::Hit> hit = RayTracing::IntersectWideBvh(ray, m_Collision->bvh, m_Collision->triangles, 0.0f, maxDistance);
+        if (!hit)
+            return std::nullopt;
+        const RayTracing::TrianglePositions& triangle = m_Collision->triangles[hit->triangle];
+        glm::vec3 normal = glm::normalize(glm::cross(glm::vec3(triangle.v1 - triangle.v0), glm::vec3(triangle.v2 - triangle.v0)));
+        if (glm::dot(normal, direction) > 0.0f)
+            normal = -normal;
+        return RaycastHit{ .distance = hit->t, .point = origin + direction * hit->t, .normal = normal };
+    }
+
     // A scene without its own sun or sky keeps the defaults (a sunset)
     void Application::ApplySceneLighting(const Assets::ModelSource& model)
     {
@@ -156,6 +195,7 @@ namespace Momo
         }
         // get() rethrows anything the build threw. The renderer keeps only the GPU copy
         RayTracing::SceneGeometry geometry = m_PendingRayTracingGeometry.get();
+        m_Collision = CollisionGeometry{ .bvh = geometry.bvh, .triangles = geometry.positions };
 
         // The textures are shared with the raster path, which has usually uploaded them already
         std::vector<vk::ImageView> textureViews;
@@ -253,7 +293,7 @@ namespace Momo
                 layer->OnUpdate(dt);
 
             // Benchmarks place the camera themselves and ignore input; screenshots keep the scene's camera
-            if (!m_Benchmark && !m_Spec.Screenshot)
+            if (!m_Benchmark && !m_Spec.Screenshot && m_FreeCamera)
                 m_Camera->OnUpdate(dt, m_InputState);
             else if (m_Benchmark && !m_Benchmark->IsFinished())
             {
@@ -499,17 +539,19 @@ namespace Momo
 
         // TODO: This doesn't have to be done every frame, but for now it's a simple way to ensure the data is up-to-date
         Renderer::VulkanModelData vulkanModelData{};
-        const Assets::ModelHandle& modelHandle = m_ActiveScene->GetModels().front(); // TODO: Handle multiple models and empty scene cases
-        for (const auto& meshHandle : m_AssetRegistry.Get(modelHandle).meshes)
+        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
         {
-            const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
-            const Renderer::VulkanMaterialData& materialData = m_MaterialCache.GetOrCreate(mesh.materialHandle);
+            for (const auto& meshHandle : m_AssetRegistry.Get(instance.model).meshes)
+            {
+                const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);
+                const Renderer::VulkanMaterialData& materialData = m_MaterialCache.GetOrCreate(mesh.materialHandle);
 
-            vulkanModelData.meshes.push_back(Renderer::VulkanMeshData {
-                .gpuMesh = m_MeshCache.GetOrCreate(meshHandle),
-                .localTransform = mesh.localTransform,
-                .materialData = materialData
-            });
+                vulkanModelData.meshes.push_back(Renderer::VulkanMeshData {
+                    .gpuMesh = m_MeshCache.GetOrCreate(meshHandle),
+                    .localTransform = instance.transform * mesh.localTransform,
+                    .materialData = materialData
+                });
+            }
         }
         //glm::vec3 rotationAxis = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));
         //glm::mat4 modelMatrix = glm::rotate(glm::mat4(1.0f), m_TotalTime * m_CubeRotationSpeed, rotationAxis);

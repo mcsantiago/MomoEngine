@@ -13,6 +13,7 @@
 #include "Momo/Cache/DataCache.h"
 #include "Momo/Core/Scene.h"
 #include "Momo/Core/Benchmark.h"
+#include "Momo/RayTracing/WideBvh.h"
 
 
 namespace Momo
@@ -38,13 +39,31 @@ namespace Momo
         std::optional<ScreenshotSpecification> Screenshot;
     };
 
+    class Application;
+
     class Layer
     {
     public:
         virtual ~Layer() = default;
         virtual void OnAttach() {}
         virtual void OnDetach() {}
+        // Called every frame before the camera's own update and the draw
         virtual void OnUpdate(float dt) {}
+    protected:
+        // The application the layer was pushed onto (set before OnAttach)
+        Application& App() { return *m_App; }
+        const Application& App() const { return *m_App; }
+    private:
+        friend class Application;
+        Application* m_App = nullptr;
+    };
+
+    // A hit from Application::Raycast
+    struct RaycastHit
+    {
+        float distance;   // Along the ray, in world units
+        glm::vec3 point;
+        glm::vec3 normal; // Unit length, facing back along the ray
     };
 
     class Application {
@@ -57,10 +76,31 @@ namespace Momo
         {
             auto layer = std::make_unique<TLayer>(std::forward<Args>(args)...);
             TLayer* raw = layer.get();
+            raw->m_App = this;
             m_Layers.emplace_back(std::move(layer));
             raw->OnAttach();
             return raw;
         }
+
+        // --- For layers ---------------------------------------------------
+        const Input::InputState& GetInput() const { return m_InputState; }
+        Camera& GetCamera() { return *m_Camera; }
+        // With the free camera off, the camera stays wherever a layer puts it
+        // instead of flying around with WASD and the mouse
+        void SetFreeCamera(bool enabled) { m_FreeCamera = enabled; }
+        // Loads a glTF model into the asset registry without placing it
+        std::optional<Assets::ModelHandle> LoadModel(const std::filesystem::path& path);
+        // Places a model in the active scene; returns the instance's index for
+        // SetInstanceTransform. Only dynamic instances may be added after the
+        // scene has loaded (static ones would miss the ray tracer's BVH).
+        size_t AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform);
+        void SetInstanceTransform(size_t instance, const glm::mat4& transform);
+        // The first hit along a ray (direction of unit length) against the
+        // static scene, within maxDistance. The collision geometry is built
+        // with the ray tracer's BVH on a worker thread, so there are no hits
+        // until IsCollisionReady(). Alpha masked surfaces (leaves) count as solid.
+        std::optional<RaycastHit> Raycast(glm::vec3 origin, glm::vec3 direction, float maxDistance) const;
+        bool IsCollisionReady() const { return m_Collision.has_value(); }
         
         void Run();
         void Shutdown();
@@ -80,6 +120,14 @@ namespace Momo
         bool m_ShowSettings = false;
         bool m_ToggleSettingsHeld = false;
         Renderer::SceneLighting m_Lighting;
+        bool m_FreeCamera = true;
+        // CPU copy of the static scene's BVH and triangles, for Raycast
+        struct CollisionGeometry
+        {
+            RayTracing::WideBvh bvh;
+            std::vector<RayTracing::TrianglePositions> triangles;
+        };
+        std::optional<CollisionGeometry> m_Collision;
         Renderer::SceneLighting m_LoadedLighting; // Defaults plus the scene's own sun and sky; "Reset lighting" returns here
         Renderer::ToonSettings m_ToonSettings;
         void DrawSettingsPanel();

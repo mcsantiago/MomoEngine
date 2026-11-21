@@ -39,9 +39,9 @@ struct SceneGeometry {
     std::vector<Assets::TextureHandle> textures;
 };
 
-// Flattens every mesh of every model in the scene into world space (the mesh's
-// localTransform; models have no transform of their own yet) and builds the
-// BVH over the result. Meshes without a material get a default white one.
+// Flattens every mesh of the scene's static instances into world space (the
+// instance's transform times the mesh's localTransform) and builds the BVH
+// over the result. Dynamic instances are left out. Meshes without a material get a default white one.
 SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Scene& scene);
 
 } // namespace Momo::RayTracing

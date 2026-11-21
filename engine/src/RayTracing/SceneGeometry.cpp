@@ -79,13 +79,13 @@ private:
 };
 
 // Appends the mesh's triangles in world space
-void AppendMesh(const Assets::Mesh& mesh, uint32_t materialIndex, bool alphaMasked,
+void AppendMesh(const Assets::Mesh& mesh, const glm::mat4& modelToWorld, uint32_t materialIndex, bool alphaMasked,
                 std::vector<TrianglePositions>& positions, std::vector<TriangleShading>& shading)
 {
     const auto& vertices = mesh.meshData.vertices;
     const auto& indices = mesh.meshData.indices;
 
-    const glm::mat4& toWorld = mesh.localTransform;
+    const glm::mat4 toWorld = modelToWorld * mesh.localTransform;
     // Normals transform by the inverse transpose so non-uniform scale doesn't skew them
     glm::mat3 normalToWorld = glm::transpose(glm::inverse(glm::mat3(toWorld)));
 
@@ -126,14 +126,16 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
     std::vector<TriangleShading> shading;
     MaterialTable materials(registry);
 
-    for (const Assets::ModelHandle& model : scene.GetModels())
+    for (const SceneInstance& instance : scene.GetInstances())
     {
-        for (const Assets::MeshHandle& meshHandle : registry.Get(model).meshes)
+        if (!instance.isStatic)
+            continue;
+        for (const Assets::MeshHandle& meshHandle : registry.Get(instance.model).meshes)
         {
             const Assets::Mesh& mesh = registry.Get(meshHandle);
             uint32_t materialIndex = materials.IndexOf(mesh.materialHandle);
             bool alphaMasked = materials.Get(materialIndex).alphaCutoff >= 0.0f;
-            AppendMesh(mesh, materialIndex, alphaMasked, positions, shading);
+            AppendMesh(mesh, instance.transform, materialIndex, alphaMasked, positions, shading);
         }
     }
 

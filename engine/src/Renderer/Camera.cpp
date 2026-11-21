@@ -50,6 +50,11 @@ void Camera::SetPose(glm::vec3 position, float yaw, float pitch) {
     UpdateCameraVectors(0, 0);
 }
 
+void Camera::LookAt(glm::vec3 position, glm::vec3 target) {
+    Camera aligned = LookingAlong(position, m_WorldUp, glm::normalize(target - position));
+    SetPose(position, aligned.m_Yaw, aligned.m_Pitch);
+}
+
 glm::mat4 Camera::GetViewMatrix() const {
     return glm::lookAt(m_Position, m_Position + m_Front, m_Up);
 }

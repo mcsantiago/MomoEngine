@@ -13,6 +13,7 @@ enum Key {
     Escape,
     P,
     Tab,
+    Shift, // Either one
     Count
 };
 
