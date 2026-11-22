@@ -14,17 +14,25 @@ namespace Momo {
 // unlike an index it survives other instances being removed.
 using EntityId = uint64_t;
 
-// One placement of a model in the scene
+enum class InstanceKind
+{
+    // Part of the ray tracer's BVH and the collision geometry, which are
+    // rebuilt in the background when a static instance changes
+    Static,
+    // Characters and things that move: can be moved every frame, but so far
+    // only the raster modes draw them
+    Dynamic,
+    // A named place with no model, for game code to look up (a spawn point, say)
+    Marker,
+};
+
+// One placement of a model in the scene, or a marker
 struct SceneInstance
 {
     EntityId id = 0; // Set by Scene::AddInstance
-    Assets::ModelHandle model;
+    Assets::ModelHandle model; // None for a marker
     glm::mat4 transform = glm::mat4(1.0f); // Model space to world space
-    // Static instances make up the ray tracer's BVH and the collision
-    // geometry, which are built once when the scene loads. Dynamic ones
-    // (characters, things that move) can be moved every frame, but so far
-    // only the raster modes draw them.
-    bool isStatic = true;
+    InstanceKind kind = InstanceKind::Static;
 
     // Where the instance came from, for saving the scene
     std::string name;
@@ -32,6 +40,9 @@ struct SceneInstance
     // Instances from the scene file are saved with it. Ones game code adds
     // while running (a player character) aren't, or reloading would add them twice.
     bool saved = true;
+
+    bool IsStatic() const { return kind == InstanceKind::Static; }
+    bool IsMarker() const { return kind == InstanceKind::Marker; }
 };
 
 class Scene

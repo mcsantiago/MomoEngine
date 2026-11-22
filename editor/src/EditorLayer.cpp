@@ -2,6 +2,7 @@
 
 #include <Momo/Logging/Logger.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -74,6 +75,7 @@ namespace Momo::Editor
         DrawAssetsPanel();
         DrawFileDialogs();
         DrawSelectionOutline();
+        DrawMarkers();
         DrawGizmo();
         HandleViewportClick();
     }
@@ -227,6 +229,28 @@ namespace Momo::Editor
         m_Entities.push_back({ *id, description });
         m_Selected = m_Entities.size() - 1;
         m_Status = "Added " + description.name;
+    }
+
+    void EditorLayer::AddMarker()
+    {
+        // On the ground ahead of the camera, facing the way it looks
+        const Camera& camera = App().GetCamera();
+        glm::vec3 forward = camera.GetFront();
+        forward.y = 0.0f;
+        forward = glm::length(forward) > 1e-3f ? glm::normalize(forward) : glm::vec3(0.0f, 0.0f, -1.0f);
+        EntityDescription description;
+        description.name = "Marker";
+        description.position = camera.GetPosition() + forward * 4.0f;
+        description.position.y = 0.0f;
+        description.rotation.y = glm::degrees(std::atan2(forward.x, forward.z));
+        description.isStatic = false;
+        RecordUndo();
+        std::optional<EntityId> id = App().AddEntity(description);
+        if (!id)
+            return;
+        m_Entities.push_back({ *id, description });
+        m_Selected = m_Entities.size() - 1;
+        m_Status = "Added a marker";
     }
 
     void EditorLayer::DuplicateSelected()
@@ -445,6 +469,16 @@ namespace Momo::Editor
         if (!m_Placing && Selected() && (ImGuizmo::IsOver() || ImGuizmo::IsUsing()))
             return;
 
+        // Markers are drawn over everything, so they're picked before it too
+        if (!m_Placing)
+        {
+            if (std::optional<size_t> marker = MarkerUnderMouse())
+            {
+                m_Selected = marker;
+                return;
+            }
+        }
+
         glm::vec3 origin, direction;
         MouseRay(origin, direction);
         std::optional<PickHit> hit = App().PickInstance(origin, direction, true);
@@ -531,6 +565,75 @@ namespace Momo::Editor
         m_GizmoInUse = inUse;
     }
 
+    namespace
+    {
+        constexpr float MarkerSize = 0.35f;      // Meters: the cross's arms, and half the arrow
+        constexpr float MarkerPickRadius = 14.0f; // Pixels around its origin
+
+        // A world position on screen; nothing if it's behind the camera
+        std::optional<ImVec2> ToScreen(const glm::mat4& viewProjection, glm::vec3 world)
+        {
+            glm::vec4 clip = viewProjection * glm::vec4(world, 1.0f);
+            if (clip.w < 0.05f)
+                return std::nullopt;
+            ImVec2 size = ImGui::GetIO().DisplaySize;
+            return ImVec2((clip.x / clip.w * 0.5f + 0.5f) * size.x, (clip.y / clip.w * 0.5f + 0.5f) * size.y);
+        }
+    }
+
+    // Markers have no model, so the editor draws them: a cross where they
+    // are, an arrow along the way they face (their +Z), and their name
+    void EditorLayer::DrawMarkers()
+    {
+        glm::mat4 viewProjection = App().GetProjectionMatrix() * App().GetCamera().GetViewMatrix();
+        ImDrawList* draw = ImGui::GetBackgroundDrawList();
+        for (size_t i = 0; i < m_Entities.size(); ++i)
+        {
+            const EntityDescription& description = m_Entities[i].description;
+            if (description.asset)
+                continue;
+            glm::mat4 transform = ComposeTransform(description.position, description.rotation, glm::vec3(1.0f));
+            auto at = [&](glm::vec3 local) { return ToScreen(viewProjection, glm::vec3(transform * glm::vec4(local, 1.0f))); };
+            ImU32 color = m_Selected == i ? IM_COL32(255, 170, 40, 255) : IM_COL32(90, 200, 255, 255);
+            auto line = [&](glm::vec3 a, glm::vec3 b) {
+                std::optional<ImVec2> from = at(a), to = at(b);
+                if (from && to)
+                    draw->AddLine(*from, *to, color, 2.0f);
+            };
+            const float s = MarkerSize;
+            line({ -s, 0, 0 }, { s, 0, 0 });
+            line({ 0, 0, -s }, { 0, 0, s * 2 });
+            line({ 0, 0, 0 }, { 0, s * 2, 0 });
+            line({ 0, 0, s * 2 }, { -s * 0.4f, 0, s * 1.4f });
+            line({ 0, 0, s * 2 }, { s * 0.4f, 0, s * 1.4f });
+            if (std::optional<ImVec2> label = at({ 0, s * 2, 0 }))
+                draw->AddText(ImVec2(label->x + 6.0f, label->y - 8.0f), color, description.name.c_str());
+        }
+    }
+
+    std::optional<size_t> EditorLayer::MarkerUnderMouse() const
+    {
+        glm::mat4 viewProjection = App().GetProjectionMatrix() * App().GetCamera().GetViewMatrix();
+        ImVec2 mouse = ImGui::GetIO().MousePos;
+        std::optional<size_t> nearest;
+        float nearestDistance = MarkerPickRadius;
+        for (size_t i = 0; i < m_Entities.size(); ++i)
+        {
+            if (m_Entities[i].description.asset)
+                continue;
+            std::optional<ImVec2> screen = ToScreen(viewProjection, m_Entities[i].description.position);
+            if (!screen)
+                continue;
+            float distance = std::hypot(screen->x - mouse.x, screen->y - mouse.y);
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = i;
+            }
+        }
+        return nearest;
+    }
+
     void EditorLayer::DrawSelectionOutline()
     {
         Entity* selected = Selected();
@@ -605,6 +708,9 @@ namespace Momo::Editor
             if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !m_RedoStack.empty()))
                 Redo();
             ImGui::Separator();
+            if (ImGui::MenuItem("Add marker"))
+                AddMarker();
+            ImGui::SetItemTooltip("A named place with no model, for the game to look up (a spawn point, say)");
             if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, Selected() != nullptr))
                 DuplicateSelected();
             if (ImGui::MenuItem("Delete", "Del", false, Selected() != nullptr))
@@ -701,8 +807,17 @@ namespace Momo::Editor
                 }
                 trackEdit();
 
-                std::filesystem::path asset = description.asset.lexically_relative(std::filesystem::absolute(m_Spec.AssetRoot));
-                ImGui::LabelText("Asset", "%s", (asset.empty() || *asset.begin() == ".." ? description.asset : asset).generic_string().c_str());
+                const bool marker = !description.asset;
+                if (marker)
+                {
+                    ImGui::LabelText("Asset", "(marker)");
+                    ImGui::SetItemTooltip("A place with a name and no model. The game finds it by its name.");
+                }
+                else
+                {
+                    std::filesystem::path asset = description.asset->lexically_relative(std::filesystem::absolute(m_Spec.AssetRoot));
+                    ImGui::LabelText("Asset", "%s", (asset.empty() || *asset.begin() == ".." ? *description.asset : asset).generic_string().c_str());
+                }
 
                 changed |= ImGui::DragFloat3("Position", &description.position.x, 0.02f, 0.0f, 0.0f, "%.3f");
                 trackEdit();
@@ -712,12 +827,14 @@ namespace Momo::Editor
                 trackEdit();
 
                 bool isStatic = description.isStatic;
+                ImGui::BeginDisabled(marker); // Nothing to ray trace or collide with
                 if (ImGui::Checkbox("Static", &isStatic))
                 {
                     RecordUndo();
                     description.isStatic = isStatic;
                     changed = true;
                 }
+                ImGui::EndDisabled();
                 ImGui::SetItemTooltip("Static entities are ray traced and collided with.\nDynamic ones can be moved by the game, but only the raster modes draw them.");
 
                 if (changed)

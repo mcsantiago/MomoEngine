@@ -128,7 +128,7 @@ SceneGeometry BuildSceneGeometry(const Assets::AssetRegistry& registry, const Sc
 
     for (const SceneInstance& instance : scene.GetInstances())
     {
-        if (!instance.isStatic)
+        if (!instance.IsStatic())
             continue;
         for (const Assets::MeshHandle& meshHandle : registry.Get(instance.model).meshes)
         {
