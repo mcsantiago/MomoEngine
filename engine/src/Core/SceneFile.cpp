@@ -123,11 +123,15 @@ namespace Momo
                 std::string where = "entities[" + std::to_string(i) + "]";
                 const json& entity = RequireObject((*entities)[i], where);
                 auto asset = entity.find("asset");
-                if (asset == entity.end() || !asset->is_string() || asset->get<std::string>().empty())
-                    throw SceneFormatError{ where + " needs an \"asset\" path" };
+                // Without an asset it's a marker
+                if (asset != entity.end() && (!asset->is_string() || asset->get<std::string>().empty()))
+                    throw SceneFormatError{ where + ".asset must be a path" };
 
                 EntityDescription description;
-                description.asset = std::filesystem::path(asset->get<std::string>());
+                if (asset != entity.end())
+                    description.asset = std::filesystem::path(asset->get<std::string>());
+                else
+                    description.isStatic = false;
                 if (auto name = entity.find("name"); name != entity.end())
                 {
                     if (!name->is_string())
@@ -217,11 +221,14 @@ namespace Momo
             nlohmann::ordered_json written;
             if (!entity.name.empty())
                 written["name"] = entity.name;
-            written["asset"] = entity.asset.generic_string();
+            bool marker = !entity.asset;
+            if (!marker)
+                written["asset"] = entity.asset->generic_string();
             written["position"] = WriteVec3(entity.position);
             written["rotation"] = WriteVec3(entity.rotation);
             written["scale"] = WriteVec3(entity.scale);
-            written["static"] = entity.isStatic;
+            if (!marker)
+                written["static"] = entity.isStatic;
             entities.push_back(std::move(written));
         }
         root["entities"] = std::move(entities);

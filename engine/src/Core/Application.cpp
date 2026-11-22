@@ -108,6 +108,8 @@ namespace Momo
             if (!id)
                 continue;
             const SceneInstance& instance = *m_ActiveScene->Find(*id);
+            if (instance.IsMarker()) // Brings no camera or lighting
+                continue;
             const LoadedAsset& asset = m_LoadedAssets.at(instance.source);
             glm::mat3 rotation = glm::mat3(instance.transform);
             if (!assetCamera && asset.camera)
@@ -180,6 +182,8 @@ namespace Momo
         glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
         for (const SceneInstance& instance : m_ActiveScene->GetInstances())
         {
+            if (instance.IsMarker())
+                continue;
             for (Assets::PointLight light : m_AssetRegistry.Get(instance.model).pointLights)
             {
                 light.position = glm::vec3(instance.transform * glm::vec4(light.position, 1.0f));
@@ -187,7 +191,7 @@ namespace Momo
                     light.name = instance.name;
                 pointLights.push_back(std::move(light));
             }
-            if (!instance.isStatic)
+            if (!instance.IsStatic())
                 continue;
             Bounds model = GetModelBounds(instance.model);
             if (model.min.x > model.max.x)
@@ -220,6 +224,8 @@ namespace Momo
     Bounds Application::GetModelBounds(Assets::ModelHandle model) const
     {
         Bounds bounds{ glm::vec3(std::numeric_limits<float>::max()), glm::vec3(std::numeric_limits<float>::lowest()) };
+        if (!model.IsValid())
+            return bounds;
         for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(model).meshes)
         {
             const Bounds& mesh = GetMeshBounds(meshHandle);
@@ -256,7 +262,7 @@ namespace Momo
         std::optional<PickHit> nearest;
         for (const SceneInstance& instance : m_ActiveScene->GetInstances())
         {
-            if (savedOnly && !instance.saved)
+            if ((savedOnly && !instance.saved) || instance.IsMarker())
                 continue;
             for (const Assets::MeshHandle& meshHandle : m_AssetRegistry.Get(instance.model).meshes)
             {
@@ -346,18 +352,30 @@ namespace Momo
 
     EntityId Application::AddDynamicInstance(Assets::ModelHandle model, const glm::mat4& transform)
     {
-        return m_ActiveScene->AddInstance({ .model = model, .transform = transform, .isStatic = false, .name = {}, .source = {}, .saved = false });
+        return m_ActiveScene->AddInstance({ .model = model, .transform = transform, .kind = InstanceKind::Dynamic, .name = {}, .source = {}, .saved = false });
     }
 
     std::optional<EntityId> Application::AddEntity(const EntityDescription& entity, const std::filesystem::path& directory)
     {
-        const LoadedAsset* asset = LoadAsset(directory / entity.asset); // An absolute asset path stays as it is
+        if (!entity.asset) // A marker: a place with a name, and nothing to draw
+            return m_ActiveScene->AddInstance({ .model = {}, .transform = entity.Transform(), .kind = InstanceKind::Marker,
+                                                .name = entity.name, .source = {}, .saved = true });
+        const LoadedAsset* asset = LoadAsset(directory / *entity.asset); // An absolute asset path stays as it is
         if (!asset)
             return std::nullopt;
         if (entity.isStatic)
             MarkStaticGeometryChanged();
-        return m_ActiveScene->AddInstance({ .model = asset->handle, .transform = entity.Transform(), .isStatic = entity.isStatic,
+        return m_ActiveScene->AddInstance({ .model = asset->handle, .transform = entity.Transform(),
+                                            .kind = entity.isStatic ? InstanceKind::Static : InstanceKind::Dynamic,
                                             .name = entity.name, .source = asset->path, .saved = true });
+    }
+
+    std::optional<EntityId> Application::FindEntity(std::string_view name) const
+    {
+        for (const SceneInstance& instance : m_ActiveScene->GetInstances())
+            if (instance.saved && instance.name == name)
+                return instance.id;
+        return std::nullopt;
     }
 
     void Application::RemoveInstance(EntityId id)
@@ -365,7 +383,7 @@ namespace Momo
         const SceneInstance* instance = m_ActiveScene->Find(id);
         if (!instance)
             return;
-        if (instance->isStatic)
+        if (instance->IsStatic())
             MarkStaticGeometryChanged();
         m_ActiveScene->Remove(id);
     }
@@ -376,16 +394,16 @@ namespace Momo
         if (!instance)
             return;
         instance->transform = transform;
-        if (instance->isStatic)
+        if (instance->IsStatic())
             MarkStaticGeometryChanged();
     }
 
     void Application::SetInstanceStatic(EntityId id, bool isStatic)
     {
         SceneInstance* instance = m_ActiveScene->Find(id);
-        if (!instance || instance->isStatic == isStatic)
+        if (!instance || instance->IsMarker() || instance->IsStatic() == isStatic)
             return;
-        instance->isStatic = isStatic;
+        instance->kind = isStatic ? InstanceKind::Static : InstanceKind::Dynamic;
         MarkStaticGeometryChanged();
     }
 
@@ -419,7 +437,7 @@ namespace Momo
         m_StaticGeometryChanged = false;
         RefreshLightsAndShadowBounds();
         bool anyStatic = std::any_of(m_ActiveScene->GetInstances().begin(), m_ActiveScene->GetInstances().end(),
-                                     [](const SceneInstance& instance) { return instance.isStatic; });
+                                     [](const SceneInstance& instance) { return instance.IsStatic(); });
         if (!anyStatic)
         {
             // Nothing to build a BVH over. The ray traced view keeps the last
@@ -443,8 +461,9 @@ namespace Momo
                 continue;
             EntityDescription entity;
             entity.name = instance.name;
-            entity.asset = instance.source;
-            entity.isStatic = instance.isStatic;
+            if (!instance.IsMarker())
+                entity.asset = instance.source;
+            entity.isStatic = instance.IsStatic();
             DecomposeTransform(instance.transform, entity.position, entity.rotation, entity.scale);
             description.entities.push_back(std::move(entity));
         }
@@ -468,11 +487,14 @@ namespace Momo
         {
             // Relative to the scene file, unless the two only share the root
             // (/home/... from /tmp/...), where an absolute path reads better
-            std::filesystem::path relative = entity.asset.lexically_relative(directory);
-            bool sharesMoreThanRoot = entity.asset.root_path() == directory.root_path() &&
-                                      !topFolder(directory).empty() && topFolder(entity.asset) == topFolder(directory);
+            if (!entity.asset)
+                continue;
+            std::filesystem::path& asset = *entity.asset;
+            std::filesystem::path relative = asset.lexically_relative(directory);
+            bool sharesMoreThanRoot = asset.root_path() == directory.root_path() &&
+                                      !topFolder(directory).empty() && topFolder(asset) == topFolder(directory);
             if (!relative.empty() && sharesMoreThanRoot)
-                entity.asset = relative;
+                asset = relative;
         }
         if (!WriteSceneFile(description, path, error))
             return false;
@@ -950,6 +972,8 @@ namespace Momo
         Renderer::VulkanModelData vulkanModelData{};
         for (const SceneInstance& instance : m_ActiveScene->GetInstances())
         {
+            if (instance.IsMarker())
+                continue;
             for (const auto& meshHandle : m_AssetRegistry.Get(instance.model).meshes)
             {
                 const Assets::Mesh& mesh = m_AssetRegistry.Get(meshHandle);

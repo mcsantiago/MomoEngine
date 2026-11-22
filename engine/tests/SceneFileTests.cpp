@@ -37,6 +37,27 @@ TEST_CASE("A scene entity only needs an asset")
     CHECK(Near(entity.Transform(), glm::mat4(1.0f)));
 }
 
+TEST_CASE("An entity without an asset is a marker")
+{
+    std::string error;
+    std::optional<SceneDescription> scene = ParseScene(
+        R"({ "entities": [ { "name": "PlayerStart", "position": [1, 0, 6], "rotation": [0, 90, 0] } ] })", error);
+    REQUIRE_MESSAGE(scene, error);
+    REQUIRE(scene->entities.size() == 1);
+    CHECK_FALSE(scene->entities[0].asset);
+    CHECK(scene->entities[0].name == "PlayerStart");
+    CHECK_FALSE(scene->entities[0].isStatic);
+
+    // Saved without an asset or a static flag, and read back the same
+    std::string saved = SerializeScene(*scene);
+    CHECK(saved.find("asset") == std::string::npos);
+    CHECK(saved.find("static") == std::string::npos);
+    std::optional<SceneDescription> again = ParseScene(saved, error);
+    REQUIRE_MESSAGE(again, error);
+    CHECK_FALSE(again->entities[0].asset);
+    CHECK(Near(again->entities[0].Transform(), scene->entities[0].Transform()));
+}
+
 TEST_CASE("A scene survives saving and loading")
 {
     SceneDescription scene;
@@ -122,7 +143,7 @@ TEST_CASE("Malformed scenes are rejected with the place that's wrong")
     CHECK_FALSE(ParseScene(R"({ "camera": { "position": [0, 1, 0], "target": [0, 0, 0] } })", error));
     CHECK(error.find("entities") != std::string::npos);
 
-    CHECK_FALSE(ParseScene(R"({ "entities": [ { "name": "No asset" } ] })", error));
+    CHECK_FALSE(ParseScene(R"({ "entities": [ { "asset": "" } ] })", error));
     CHECK(error.find("entities[0]") != std::string::npos);
 
     CHECK_FALSE(ParseScene(R"({ "entities": [ { "asset": "a.glb", "position": [1, 2] } ] })", error));

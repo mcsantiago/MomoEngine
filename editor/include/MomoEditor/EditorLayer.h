@@ -16,6 +16,7 @@
 //
 //   Right mouse (held)   fly: mouse looks, WASD moves, Q/E down/up, Shift faster
 //   Left click           select the entity under the mouse (or place an asset)
+//   Edit > Add marker    a named place with no model (a spawn point, say)
 //   W / E / R            move / rotate / scale gizmo; hold Ctrl to snap
 //   F                    look at the selection
 //   Delete, Ctrl+D       delete, duplicate
@@ -66,6 +67,8 @@ namespace Momo::Editor
         void Redo();
 
         void AddEntity(const std::filesystem::path& asset, glm::vec3 position);
+        // A marker: an entity with a name and a place but no model, for game code to look up
+        void AddMarker();
         void DuplicateSelected();
         void DeleteSelected();
         void FocusSelected();
@@ -81,6 +84,9 @@ namespace Momo::Editor
         void HandleViewportClick();
         void DrawGizmo();
         void DrawSelectionOutline();
+        void DrawMarkers();
+        // The marker drawn under the mouse, if any
+        std::optional<size_t> MarkerUnderMouse() const;
         void DrawMenuBar();
         void DrawEntitiesPanel();
         void DrawInspector();

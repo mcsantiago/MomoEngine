@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <utility>
 #include <memory>
@@ -142,7 +143,12 @@ namespace Momo
         const Scene& GetScene() const { return *m_ActiveScene; }
         // Adds an entity that is saved with the scene. Its asset path is
         // relative to directory, unless it's absolute.
+        // One without an asset is a marker: a named place that draws nothing.
         std::optional<EntityId> AddEntity(const EntityDescription& entity, const std::filesystem::path& directory = {});
+        // The first saved entity with this name, such as a marker the scene
+        // places for the game. Look it up again after the scene is edited
+        // or reloaded: ids don't survive that.
+        std::optional<EntityId> FindEntity(std::string_view name) const;
         void RemoveInstance(EntityId instance);
         void SetInstanceStatic(EntityId instance, bool isStatic);
         void SetInstanceName(EntityId instance, const std::string& name);

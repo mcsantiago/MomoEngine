@@ -20,15 +20,17 @@
 //     "entities": [
 //       { "name": "Street", "asset": "Market/Market.glb" },
 //       { "name": "Crate", "asset": "../Models/Crate.glb", "position": [2, 0, 4],
-//         "rotation": [0, 35, 0], "scale": [1, 1, 1], "static": true }
+//         "rotation": [0, 35, 0], "scale": [1, 1, 1], "static": true },
+//       { "name": "PlayerStart", "position": [0, 0, 6], "rotation": [0, 180, 0] }
 //     ]
 //   }
 //
 // Asset paths are relative to the scene file. Rotations are Euler angles in
 // degrees, applied about X, then Y, then Z (world axes; Blender's default
-// "XYZ Euler"). Everything but "entities" and each entity's "asset" is
-// optional: entities default to the origin, unrotated, at scale 1, and
-// static. Without a camera or lighting, the scene uses the first ones its
+// "XYZ Euler"). Everything but "entities" is optional: entities default to the
+// origin, unrotated, at scale 1, and static. An entity without an "asset" is a
+// marker: a named place that draws nothing, for game code to look up with
+// Application::FindEntity (a spawn point, say). Without a camera or lighting, the scene uses the first ones its
 // assets bring (a glTF camera, a directional light, sky extras).
 namespace Momo
 {
@@ -37,7 +39,8 @@ namespace Momo
     struct EntityDescription
     {
         std::string name;
-        std::filesystem::path asset; // As written in the file: relative to it, or absolute
+        // As written in the file: relative to it, or absolute. Without one the entity is a marker.
+        std::optional<std::filesystem::path> asset;
         glm::vec3 position{ 0.0f };
         glm::vec3 rotation{ 0.0f }; // Euler degrees, X then Y then Z
         glm::vec3 scale{ 1.0f };
